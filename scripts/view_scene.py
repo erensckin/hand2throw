@@ -9,6 +9,10 @@ Usage (from the repo root):
     uv run python scripts/view_scene.py --suite libero_object --task-id 5 --init-state 0
     uv run python scripts/view_scene.py --bddl scenes/my_scene.bddl --episode-steps 100
     uv run python scripts/view_scene.py --suite libero_spatial --task-id 0 --cams
+    uv run python scripts/view_scene.py --bddl scenes/throw_ketchup_basket.bddl --project --cams
+
+--project applies the throwing-task settings from throw_env.py (raised controller
+speed, pulled-back agentview, objects re-seated on the floor).
 
 Viewer controls:
     SPACE         pause / resume this script's stepping
@@ -39,6 +43,8 @@ import torch
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 
+import throw_env
+
 NOOP = np.array([0, 0, 0, 0, 0, 0, -1], dtype=np.float64)  # no motion, gripper open
 SETTLE_STEPS = 10  # same as LeRobot's LiberoEnv: let objects settle after reset
 CONTROL_FREQ = 20  # Hz, LIBERO default; one env.step = 1/20 s of sim time
@@ -67,6 +73,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--slowmo", type=float, default=1.0, help="1 = real time, 4 = 4x slower")
     p.add_argument("--cams", action="store_true", help="also show agentview + wrist cameras in an OpenCV window")
     p.add_argument("--size", type=int, default=256, help="camera resolution (square)")
+    p.add_argument("--project", action="store_true", help="apply the throwing-task settings from throw_env.py")
+    p.add_argument("--pullback", type=float, default=throw_env.AGENTVIEW_PULLBACK,
+                   help="with --project: how far to pull agentview back along its viewing axis (m)")
     return p.parse_args()
 
 
@@ -120,7 +129,7 @@ def make_cam_display():
 
     def show(obs):
         # Robosuite renders upside down; flip both axes like LeRobot's LiberoEnv.render().
-        frames = [obs[k][::-1, ::-1] for k in ("agentview_image", "robot0_eye_in_hand_image")]
+        frames = [obs[k][::-1, ::-1] for k in throw_env.CAMERA_TO_FEATURE if k in obs]
         cv2.imshow("cameras", cv2.cvtColor(np.hstack(frames), cv2.COLOR_RGB2BGR))
         cv2.waitKey(1)
 
@@ -132,18 +141,21 @@ def main() -> None:
     bddl, init_states = resolve_task(args)
     print(f"Scene: {bddl}")
 
-    env = OffScreenRenderEnv(
-        bddl_file_name=bddl,
-        camera_heights=args.size,
-        camera_widths=args.size,
-        control_freq=CONTROL_FREQ,
-        # Soft reset keeps the same MuJoCo model/data, so the viewer stays attached
-        # across resets. A hard reset would rebuild the model and orphan the viewer.
-        hard_reset=False,
-        # robosuite raises once timestep >= horizon unless done-checking is off;
-        # an idle viewer would otherwise crash after horizon (1000 steps = 50 s).
-        ignore_done=True,
-    )
+    if args.project:
+        env = throw_env.make_env(bddl, camera_size=args.size)
+    else:
+        env = OffScreenRenderEnv(
+            bddl_file_name=bddl,
+            camera_heights=args.size,
+            camera_widths=args.size,
+            control_freq=CONTROL_FREQ,
+            # Soft reset keeps the same MuJoCo model/data, so the viewer stays attached
+            # across resets. A hard reset would rebuild the model and orphan the viewer.
+            hard_reset=False,
+            # robosuite raises once timestep >= horizon unless done-checking is off;
+            # an idle viewer would otherwise crash after horizon (1000 steps = 50 s).
+            ignore_done=True,
+        )
     episode = {"idx": 0}
 
     def reset_episode():
@@ -153,6 +165,8 @@ def main() -> None:
             k = (args.init_state + episode["idx"]) % len(init_states)
             obs = env.set_init_state(init_states[k])
             print(f"[reset] init state {k}/{len(init_states)}")
+        if args.project:
+            throw_env.apply_scene_fixes(env, pullback=args.pullback)
         for _ in range(SETTLE_STEPS):
             obs, _, _, _ = env.step(NOOP)
         episode["idx"] += 1

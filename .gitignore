@@ -7,6 +7,9 @@ wheels/
 *.egg-info
 outputs/
 
+# Recorded datasets and raw operator video (large; datasets go to the HF Hub instead)
+data/
+
 # Personal Notes
 notes.md
 
