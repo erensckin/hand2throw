@@ -5,6 +5,10 @@ build/
 dist/
 wheels/
 *.egg-info
+outputs/
+
+# Personal Notes
+notes.md
 
 # Virtual environments
 .venv
