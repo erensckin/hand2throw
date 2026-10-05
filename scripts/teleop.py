@@ -14,11 +14,9 @@ Mappings (relative control, so no calibration between the cameras is needed):
       --camera2  phone on your LEFT, looking across your hand (--cam2-axis horizontal),
                  or overhead looking down (--cam2-axis vertical):
                      hand towards / away from the screen -> forward / back (x, towards the basket)
-      The operator view is then from behind the robot: screen-left = robot-left, into the
-      screen = forward.
   planar (default without --camera2): one webcam. Hand left/right -> forward/back (x),
       up/down -> z, robot y fixed (or --lateral-from-size: noisy, wrist tilt reads as
-      sideways motion). The operator view is then from the side (basket on the right).
+      sideways motion).
 
 Throwing: grab the ketchup, then press T. The scripted throw (throw_env.ThrowPrimitive)
 runs from wherever the hand is: rise, pull back to the wind-up pose, sweep, release. Its
@@ -26,21 +24,32 @@ strength comes from the calibration fit and the TRUE basket distance, i.e. privi
 simulator information that only the demonstrator has; the policy never sees it and has to
 infer the strength from the cameras. You decide whether to throw (or place) and when.
 Your hand input is ignored while it runs; every step is recorded. Baskets within reach
-(0.70 m) are placed by hand: pinch, carry, release over the basket.
+(0.70 m) are placed by hand: pinch, carry, release over the basket. After each throw the
+terminal prints where the ketchup came to rest relative to the basket centre.
 
 Control is relative with a clutch: SPACE anchors your current hand pose to the robot's
 current gripper position and the robot follows from there; SPACE again pauses (the robot
 holds). The first SPACE of an episode starts recording. Targets are clamped to the arm's
 comfortable reach, so pulling the hand back always moves the arm back at once.
 
-Window: four panels (operator view | webcam / wrist camera | phone) and a status strip
-below showing the basket distance and whether to place or throw.
+Hand position is measured as the palm's offset from the image centre in units of the
+hand's own apparent size. For a pinhole camera that is the hand's real offset divided by
+its real size, whatever its distance, so moving towards one camera doesn't leak into the
+axes that camera measures, and --gain is robot metres per metre of hand motion for both
+cameras. Each camera's features update only when it delivers a new frame. The gripper is
+held pointing down at its reset orientation (rotation servo) while you teleoperate.
+
+Window (landscape, 3 x 2 tiles):
+    agentview      | side camera   | webcam
+    wrist camera   | status text   | phone
+You see exactly the three cameras the policy gets, as recorded (LIBERO's 180-degree image
+convention, so they can look mirrored), so a demo never relies on a view the policy lacks.
+The status tile shows the basket distance and whether to place or throw.
 
 Keys (click the teleop window first):
     SPACE  follow / pause            t    throw (strength set from the basket distance)
     s      save episode              d / r  discard episode and reset
     f / v / l  flip forward / vertical / lateral direction
-    c      cycle operator view (rear / side / agentview)
     m      toggle fullscreen         q    quit (discards an unsaved episode)
 
 Gripper timing: commands are the plain +-1 LIBERO uses, so the fingers start opening
@@ -65,6 +74,7 @@ os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts/truetype/dejavu")
 
 import argparse
 import json
+import textwrap
 import threading
 import time
 import urllib.request
@@ -83,13 +93,12 @@ MODEL_URL = (
 )
 MODEL_PATH = Path.home() / ".cache" / "mediapipe" / "hand_landmarker.task"
 PALM_IDS = [0, 5, 9, 13, 17]  # wrist + finger bases: a stable palm centre
+HAND_SIZE_M = 0.09  # typical adult wrist -> middle-finger-base length (m): converts hand-size units to metres
 WS_LOW = np.array([-0.50, -0.35, 0.02])  # gripper-target workspace box (world, m)
 WS_HIGH = np.array([0.35, 0.35, 0.80])
 MAX_EPISODE_STEPS = 600  # 30 s at 20 Hz
-# Operator-only free cameras (MuJoCo: camera looks along (cos el cos az, cos el sin az, sin el)).
-SIDE_VIEW = {"lookat": (-0.05, 0.0, 0.35), "distance": 2.1, "azimuth": 90.0, "elevation": -12.0}
-REAR_VIEW = {"lookat": (-0.10, 0.0, 0.15), "distance": 1.9, "azimuth": 0.0, "elevation": -35.0}
-VIEWS = {"rear": REAR_VIEW, "side": SIDE_VIEW, "agentview": None}  # agentview = the policy's camera
+SETTLE_SPEED = 0.05  # m/s: below this for SETTLE_STEPS the thrown object counts as at rest
+SETTLE_STEPS = 5
 SUCCESS_HOLD_STEPS = 10  # success predicate must hold this long (0.5 s) before auto-save
 LOST_RESET_FRAMES = 5  # after this many frames without a hand, smoothing restarts
 WINDOW = "teleop"
@@ -240,30 +249,41 @@ class TrackerWorker:
 
 
 class HandFeatures:
-    """Palm centre, hand size and pinch ratio, with light exponential smoothing."""
+    """Hand features from one camera, updated only when that camera delivers a new frame.
 
-    def __init__(self, alpha: float):
-        self.alpha = alpha
-        self.palm = None
-        self.size = None
+    uv: palm centre's offset from the image centre in units of the hand's apparent size
+    (wrist -> middle-finger base). Pinhole camera: u = X / S, the real sideways offset over
+    the real hand size, independent of the hand's distance to the camera. Smoothed with
+    `alpha`; the size (which changes slowly) more strongly, so its noise stays out of uv.
+    """
+
+    def __init__(self, alpha: float, alpha_size: float = 0.3):
+        self.alpha, self.alpha_size = alpha, alpha_size
+        self.uv = self.size = None
+        self.stamp = None
+        self.last = None
         self.lost = 0
 
-    def update(self, pts):
-        if pts is None:
+    def update(self, res: dict):
+        if res["stamp"] == self.stamp:  # no new frame from this camera: nothing new to smooth in
+            return self.last
+        self.stamp = res["stamp"]
+        pts, frame = res["pts"], res["frame"]
+        if pts is None or frame is None:
             self.lost += 1
             if self.lost >= LOST_RESET_FRAMES:
-                self.palm = self.size = None
+                self.uv = self.size = None
+            self.last = None
             return None
         self.lost = 0
-        palm = pts[PALM_IDS, :2].mean(axis=0)
-        size = float(np.linalg.norm(pts[0, :2] - pts[9, :2]))  # wrist -> middle-finger base
-        pinch = float(np.linalg.norm(pts[4, :2] - pts[8, :2])) / max(size, 1e-6)  # thumb tip -> index tip
-        if self.palm is None:
-            self.palm, self.size = palm, size
-        else:
-            self.palm = self.alpha * palm + (1 - self.alpha) * self.palm
-            self.size = self.alpha * size + (1 - self.alpha) * self.size
-        return {"palm": self.palm.copy(), "size": self.size, "pinch": pinch}
+        h, w = frame.shape[:2]
+        size = max(float(np.linalg.norm(pts[0, :2] - pts[9, :2])), 1e-6)
+        pinch = float(np.linalg.norm(pts[4, :2] - pts[8, :2])) / size  # thumb tip -> index tip
+        self.size = size if self.size is None else self.alpha_size * size + (1 - self.alpha_size) * self.size
+        uv = (pts[PALM_IDS, :2].mean(axis=0) - np.array([w / 2, h / 2])) / self.size
+        self.uv = uv if self.uv is None else self.alpha * uv + (1 - self.alpha) * self.uv
+        self.last = {"uv": self.uv.copy(), "size": self.size, "pinch": pinch}
+        return self.last
 
 
 # ----------------------------------------------------------------------------- dataset
@@ -366,26 +386,6 @@ class EpisodeLog:
 # ----------------------------------------------------------------------------- display
 
 
-def render_operator_view(env, size: int, view: dict) -> np.ndarray:
-    """Operator-only free-camera view through robosuite's own render context.
-
-    Reusing robosuite's GL context (instead of a second mujoco.Renderer) avoids switching
-    the current GL context under robosuite, which would corrupt the recorded camera images.
-    The next robosuite camera render passes a camera id and switches back to fixed mode.
-    """
-    from robosuite.utils.binding_utils import _MjSim_render_lock
-
-    ctx = env.sim._render_context_offscreen
-    ctx.cam.lookat[:] = view["lookat"]
-    ctx.cam.distance = view["distance"]
-    ctx.cam.azimuth = view["azimuth"]
-    ctx.cam.elevation = view["elevation"]
-    with _MjSim_render_lock:
-        ctx.render(width=size, height=size, camera_id=-1)
-        img = ctx.read_pixels(size, size)
-    return np.ascontiguousarray(img[::-1])  # OpenGL rows are bottom-up
-
-
 def put_text(img, text: str, org, color, scale: float = 0.6) -> None:
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
@@ -422,22 +422,30 @@ def camera_panel(cam, size: int, label: str):
     return panel
 
 
-def draw(panels: list, lines: list) -> None:
-    """2x2 grid [[top-left, top-right], [bottom-left, bottom-right]] plus a status strip below."""
-    grid = np.vstack([np.hstack(panels[:2]), np.hstack(panels[2:])])
-    strip = np.zeros((22 * len(lines) + 14, grid.shape[1], 3), np.uint8)
-    for i, (text, color) in enumerate(lines):
-        put_text(strip, text, (10, 22 + 22 * i), color)
-    cv2.imshow(WINDOW, np.vstack([grid, strip]))
+def text_panel(lines: list, size: int):
+    """Status text, wrapped to the tile width."""
+    panel = np.zeros((size, size, 3), np.uint8)
+    chars = max(10, int(size / 10))  # ~10 px per character at scale 0.5
+    y = 20
+    for text, color in lines:
+        for chunk in textwrap.wrap(text, chars) or [""]:
+            if y > size - 6:
+                return panel
+            put_text(panel, chunk, (8, y), color, 0.5)
+            y += 18
+        y += 4
+    return panel
+
+
+def draw(tiles: list) -> None:
+    """3 x 2 grid: tiles = [top-left, top-middle, top-right, bottom-left, bottom-middle, bottom-right]."""
+    cv2.imshow(WINDOW, np.vstack([np.hstack(tiles[:3]), np.hstack(tiles[3:])]))
 
 
 def basket_hint(distance: float) -> str:
-    """What to do for this basket."""
-    if distance < 0.775:
-        return "PLACE by hand"
-    if distance < throw_env.PLACE_THROW_BOUNDARY:
-        return "place by hand at full stretch, or THROW (t)"
-    return "THROW (t)"
+    """What to do for this basket. One strategy per distance keeps the demos consistent:
+    within reach (0.70 m) place by hand, from 0.80 m on throw."""
+    return "PLACE by hand" if distance < 0.775 else "THROW (t)"
 
 
 # ----------------------------------------------------------------------------- main
@@ -452,8 +460,6 @@ def parse_args() -> argparse.Namespace:
                         "(phone beside you: horizontal; overhead: vertical)")
     p.add_argument("--mapping", choices=["auto", "ego", "planar"], default="auto",
                    help="auto = ego with --camera2, planar without")
-    p.add_argument("--view", choices=["auto", "rear", "side", "agentview"], default="auto",
-                   help="starting operator view (key c cycles); auto = rear for ego, side for planar")
     p.add_argument("--no-mirror", action="store_true", help="don't mirror the front camera image")
     p.add_argument("--mirror2", action="store_true", help="mirror the second camera image")
     p.add_argument("--lateral-from-size", action="store_true",
@@ -466,7 +472,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--distances", type=lambda s: [float(x) for x in s.split(",") if x.strip()],
                    default=list(throw_env.TRAIN_BASKET_DISTANCES),
                    help="comma list of basket distances from the robot base (m); e.g. --distances 1.1 for one")
-    p.add_argument("--gain", type=float, default=1.0, help="metres of robot motion per frame-height of hand motion")
+    p.add_argument("--gain", type=float, default=1.7, help="robot metres per metre of hand motion (both cameras)")
     p.add_argument("--depth-gain", type=float, default=0.4, help="--lateral-from-size: metres per 100%% size change")
     p.add_argument("--flip-forward", action="store_true", help="start with the forward direction inverted")
     p.add_argument("--flip-up", action="store_true", help="start with the vertical direction inverted")
@@ -477,8 +483,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cam-width", type=int, default=640, help="requested webcam width")
     p.add_argument("--cam-height", type=int, default=480, help="requested webcam height")
     p.add_argument("--cam-fps", type=int, default=30, help="requested webcam fps")
-    p.add_argument("--display-size", type=int, default=420,
-                   help="size of each of the four panels in px (bigger = sharper, slower to render)")
+    p.add_argument("--display-size", type=int, default=360,
+                   help="size of each of the six square tiles in px (window = 3x2 tiles)")
     p.add_argument("--pinch-close", type=float, default=0.30, help="pinch ratio below which the gripper closes")
     p.add_argument("--pinch-open", type=float, default=0.45, help="pinch ratio above which it opens again")
     p.add_argument("--no-auto-save", action="store_true", help="don't save automatically on success")
@@ -490,15 +496,14 @@ def main() -> None:
     mapping = args.mapping if args.mapping != "auto" else ("ego" if args.camera2 else "planar")
     if mapping == "ego" and not args.camera2:
         raise SystemExit("--mapping ego needs --camera2 (forward/back comes from the second camera)")
-    view_names = list(VIEWS)
-    view_name = args.view if args.view != "auto" else ("rear" if mapping == "ego" else "side")
     # Forward default for ego + phone on your LEFT looking across (unmirrored): moving the hand
     # towards the screen moves it left in the phone image, i.e. negative image x.
     fwd_default = -1.0 if (mapping == "ego" and args.cam2_axis == "horizontal") else 1.0
+    lat_default = -1.0 if mapping == "ego" else 1.0  # set from use on the dev machine (2026-10-05)
     signs = {
         "fwd": fwd_default * (-1.0 if args.flip_forward else 1.0),
         "up": -1.0 if args.flip_up else 1.0,
-        "lat": -1.0 if args.flip_lateral else 1.0,
+        "lat": lat_default * (-1.0 if args.flip_lateral else 1.0),
     }
 
     model = ensure_model()
@@ -527,7 +532,7 @@ def main() -> None:
     if mapping == "ego":
         cam1_label, cam2_label = "webcam: left/right, up/down, pinch", "phone: forward/back"
     else:
-        cam1_label, cam2_label = "webcam: forward/back, up/down, pinch", "camera 2 (unused)"
+        cam1_label, cam2_label = "webcam: fwd/back, up/down, pinch", "camera 2 (unused)"
     print(f"Task: {task!r}   controller output_max={throw_env.OUTPUT_MAX} m/step")
     print(f"Mapping: {mapping} (lateral: {lateral_desc}"
           + (f", forward: camera 2 {args.cam2_axis})" if mapping == "ego" else ", forward: webcam)"))
@@ -545,12 +550,26 @@ def main() -> None:
             st["practice_count"] += 1
         obs = throw_env.reset_scene(env, basket_distance=distance)
         st.update(following=False, recording=False, ended=None, anchor1=None, anchor2=None, ee_anchor=None,
-                  cam2_anchor=None, hold=obs["robot0_eef_pos"].copy(), grip_closed=False, success_steps=0, n=0,
-                  basket=distance, layout=getattr(env, "_clutter_layout", {}), throw=None, thrown=None)
+                  cam2_anchor=None, hold=obs["robot0_eef_pos"].copy(), hold_quat=obs["robot0_eef_quat"].copy(),
+                  grip_closed=False, success_steps=0, n=0, basket=distance,
+                  layout=getattr(env, "_clutter_layout", {}), throw=None, thrown=None, settle=0)
+
+    def landing_report() -> None:
+        """Where the thrown ketchup came to rest, relative to the basket centre (once per throw)."""
+        if not st["thrown"] or "rest_error_cm" in st["thrown"]:
+            return
+        inner = env.env
+        obj = inner.sim.data.body_xpos[inner.obj_body_id[throw_env.TARGET_OBJECT]]
+        err = obj[:2] - throw_env.footprint_center(env, "basket_1")
+        st["thrown"]["rest_error_cm"] = [round(float(e) * 100, 1) for e in err]
+        print(f"[throw] basket {st['basket']:.2f} m: ketchup at rest {abs(err[0]) * 100:.1f} cm "
+              f"{'long' if err[0] > 0 else 'short'}, {abs(err[1]) * 100:.1f} cm {'left' if err[1] > 0 else 'right'} "
+              f"of the basket centre; in basket: {env.check_success()}")
 
     def save_episode() -> None:
         if ds is None or not st["recording"] or st["n"] == 0:
             return
+        landing_report()
         idx = ds.meta.total_episodes
         success = bool(env.check_success())
         ds.save_episode()
@@ -591,14 +610,17 @@ def main() -> None:
             ema("detect", c1["detect_ms"])
             if c2 is not None:
                 ema("detect2", c2["detect_ms"])
-            f1 = feats1.update(c1["pts"])
-            f2 = feats2.update(c2["pts"]) if c2 is not None else None
+            f1 = feats1.update(c1)
+            f2 = feats2.update(c2) if c2 is not None else None
             ee = obs["robot0_eef_pos"].copy()
 
             if st["throw"] is not None:
                 # ---- scripted throw: hand input ignored, its actions are recorded like any other
                 a = st["throw"].next_action(env, obs)
                 if st["throw"].done:
+                    gap = st["throw"].grip_gap
+                    st["thrown"].update(release_step=st["throw"].release_step,
+                                         grip_gap_mm=None if gap is None else round(gap * 1000, 1))
                     st["throw"] = None
                     st["grip_closed"] = False  # the throw ends with the gripper open
                     stop_following(ee)
@@ -611,24 +633,22 @@ def main() -> None:
                         st["grip_closed"] = False
 
                 target = st["hold"].copy()
-                if st["following"] and f1 is not None and c1["frame"] is not None:
-                    h1 = c1["frame"].shape[0]
-                    du1 = (f1["palm"][0] - st["anchor1"]["palm"][0]) / h1  # image right
-                    dv1 = (f1["palm"][1] - st["anchor1"]["palm"][1]) / h1  # image down
-                    target[2] = st["ee_anchor"][2] - signs["up"] * args.gain * dv1
+                k = args.gain * HAND_SIZE_M  # robot metres per hand-size unit
+                if st["following"] and f1 is not None:
+                    du1, dv1 = f1["uv"] - st["anchor1"]["uv"]  # image right / image down, hand-size units
+                    target[2] = st["ee_anchor"][2] - signs["up"] * k * dv1
                     if mapping == "ego":  # mirrored webcam: hand left = image left = robot's left (+y)
-                        target[1] = st["ee_anchor"][1] - signs["lat"] * args.gain * du1
+                        target[1] = st["ee_anchor"][1] - signs["lat"] * k * du1
                     else:
-                        target[0] = st["ee_anchor"][0] + signs["fwd"] * args.gain * du1
+                        target[0] = st["ee_anchor"][0] + signs["fwd"] * k * du1
                         if args.lateral_from_size:
                             ds_ = f1["size"] / st["anchor1"]["size"] - 1.0
                             target[1] = st["ee_anchor"][1] + signs["lat"] * args.depth_gain * ds_
-                if st["following"] and mapping == "ego" and f2 is not None and c2["frame"] is not None:
+                if st["following"] and mapping == "ego" and f2 is not None:  # phone: forward/back only
                     if st["anchor2"] is None:  # camera 2 found the hand after SPACE: anchor it now
                         st["anchor2"], st["cam2_anchor"] = dict(f2), target[0]
                     axis = 0 if args.cam2_axis == "horizontal" else 1
-                    d2 = (f2["palm"][axis] - st["anchor2"]["palm"][axis]) / c2["frame"].shape[0]
-                    target[0] = st["cam2_anchor"] + signs["fwd"] * args.gain * d2
+                    target[0] = st["cam2_anchor"] + signs["fwd"] * k * (f2["uv"][axis] - st["anchor2"]["uv"][axis])
                 if st["following"]:
                     # Keep the target reachable and move the anchors with it, so pulling the hand
                     # back moves the arm back at once instead of the arm seeming stuck.
@@ -643,6 +663,7 @@ def main() -> None:
                 target = np.clip(target, WS_LOW, WS_HIGH)
 
                 a = throw_env.p_action(ee, target, gripper=1.0 if st["grip_closed"] else -1.0, gain=args.track_gain)
+                a[3:6] = throw_env.orientation_action(obs["robot0_eef_quat"], st["hold_quat"])  # keep it pointing down
                 reach, radial = throw_env.reach_info(env)
                 if reach > throw_env.WRIST_REACH_LIMIT:  # hard stop near full extension
                     outward = float(np.dot(a[:3], radial))
@@ -666,6 +687,12 @@ def main() -> None:
             obs, _, _, _ = env.step(a)
             st["success_steps"] = st["success_steps"] + 1 if env.check_success() else 0
             ema("step", (time.perf_counter() - t_step) * 1000)
+            if st["thrown"] and st["throw"] is None and "rest_error_cm" not in st["thrown"]:
+                inner = env.env
+                v = inner.sim.data.get_joint_qvel(inner.objects_dict[throw_env.TARGET_OBJECT].joints[-1])[:3]
+                st["settle"] = st["settle"] + 1 if np.linalg.norm(v) < SETTLE_SPEED else 0
+                if st["settle"] >= SETTLE_STEPS:
+                    landing_report()
 
             if (st["recording"] and st["ended"] is None and st["success_steps"] >= SUCCESS_HOLD_STEPS
                     and st["throw"] is None and not args.no_auto_save):
@@ -684,39 +711,39 @@ def main() -> None:
                 mode_txt = ("paused - SPACE to follow", (0, 200, 255))
             cam2_txt = f"   cam2 {c2['fps']:.0f}fps {'hand' if f2 else 'NO HAND'}" if c2 is not None else ""
             lines = [
-                (f"{status}  saved: {ds.meta.total_episodes if ds else '-'}  steps: {st['n']}"
-                 + (f"   per distance {log.summary(args.distances)}" if ds else ""),
+                (f"{status}   saved {ds.meta.total_episodes if ds else '-'}   steps {st['n']}",
                  (0, 0, 255) if status == "REC" else (255, 255, 255)),
-                (f"basket {st['basket']:.2f} m  ->  {basket_hint(st['basket'])}", (255, 255, 0)),
+                (f"basket {st['basket']:.2f} m: {basket_hint(st['basket'])}", (255, 255, 0)),
                 mode_txt,
-                (f"gripper: {'CLOSED' if st['grip_closed'] else 'open'}   "
-                 + (f"pinch: {f1['pinch']:.2f}" if f1 else "no hand") + f"   mapping: {mapping}{cam2_txt}",
-                 (255, 255, 255)),
+                (f"gripper {'CLOSED' if st['grip_closed'] else 'open'}   "
+                 + (f"pinch {f1['pinch']:.2f}" if f1 else "no hand"), (255, 255, 255)),
+                (f"mapping {mapping}{cam2_txt}", (255, 255, 255)),
                 (f"success {st['success_steps']}"
-                 + (f"   thrown at {st['thrown']['target_distance']:.2f} m (strength {st['thrown']['strength']:.2f})"
+                 + (f"   thrown at {st['thrown']['target_distance']:.2f} m (s {st['thrown']['strength']:.2f})"
                     if st["thrown"] else ""), (255, 255, 255)),
             ]
+            if ds:
+                lines.append((f"per distance: {log.summary(args.distances)}", (200, 200, 200)))
             if st["ended"]:
                 lines.append((st["ended"], (0, 200, 255)))
             lines.append((
-                f"cam {c1['fps']:.0f}fps age {timing['age']:.0f}ms | detect {timing['detect']:.0f}"
+                f"cam {c1['fps']:.0f}fps age {timing['age']:.0f}ms  detect {timing['detect']:.0f}"
                 + (f"/{timing['detect2']:.0f}" if c2 is not None else "")
-                + f" | step {timing['step']:.0f} | render {timing['render']:.0f} | loop {timing['loop']:.0f} ms",
+                + f"  step {timing['step']:.0f}  render {timing['render']:.0f}  loop {timing['loop']:.0f} ms",
                 (0, 0, 255) if timing["loop"] > period * 1000 else (0, 255, 0),
             ))
             images = throw_env.policy_images(obs)
-            t_ren = time.perf_counter()
-            if VIEWS[view_name] is None:  # agentview: the policy's own camera, no extra render
-                main_img = images["observation.images.image"]
-            else:
-                main_img = render_operator_view(env, args.display_size, VIEWS[view_name])
-            ema("render", (time.perf_counter() - t_ren) * 1000)
             size = args.display_size
+            t_ren = time.perf_counter()
             draw([
-                sim_panel(main_img, size, f"{view_name} view (c: cycle)"), camera_panel(c1, size, cam1_label),
-                sim_panel(images["observation.images.image2"], size, "wrist camera"),
+                sim_panel(images["observation.images.image"], size, "agentview (policy)"),
+                sim_panel(images["observation.images.image3"], size, "side camera (policy)"),
+                camera_panel(c1, size, cam1_label),
+                sim_panel(images["observation.images.image2"], size, "wrist camera (policy)"),
+                text_panel(lines, size),
                 camera_panel(c2, size, cam2_label),
-            ], lines)
+            ])
+            ema("render", (time.perf_counter() - t_ren) * 1000)  # now: composing + showing the window
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
@@ -734,7 +761,7 @@ def main() -> None:
             elif key == THROW_KEY and st["throw"] is None and st["thrown"] is None:
                 distance = st["basket"]  # true distance: privileged, demonstrator only
                 strength = throw_env.strength_for_distance(distance)
-                st["throw"] = throw_env.ThrowPrimitive(env, strength)
+                st["throw"] = throw_env.ThrowPrimitive(env, strength, hold_quat=st["hold_quat"])
                 st["thrown"] = {"target_distance": distance, "strength": round(strength, 3), "start_step": st["n"]}
                 st["following"] = False
             elif key == ord("s"):
@@ -749,8 +776,6 @@ def main() -> None:
                 if st["following"]:  # re-anchor so flipping doesn't make the arm jump
                     stop_following(ee)
                 print(f"{axis} direction flipped (press SPACE to follow again)")
-            elif key == ord("c"):
-                view_name = view_names[(view_names.index(view_name) + 1) % len(view_names)]
             elif key == ord("m"):
                 fullscreen = not fullscreen
                 cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN,

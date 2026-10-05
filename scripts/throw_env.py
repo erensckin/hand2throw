@@ -10,11 +10,10 @@ What it fixes relative to stock LIBERO (see PROJECT_NOTES.md for the reasoning):
   * agentview camera: LIBERO's stock floor-scene pose (no pull-back by default), i.e. the
     exact camera1 view smolvla_libero saw for libero_object. It covers the pick area and
     the clutter; the side camera covers the basket and the throw.
-  * clutter: after every reset the ketchup and four distractors are placed uniformly at
-    random in a pick area in front of the robot (no overlaps, room for the open fingers),
-    distractors with random yaw, so the layout and the ketchup's position change every
-    episode and the instruction actually matters. (LIBERO itself samples each object in
-    its own ~5 cm region, i.e. a near-fixed layout per task.)
+  * clutter: the ketchup and four distractors each have their own spot in front of the
+    robot, jittered by +-1 cm after every reset, with LIBERO's fixed orientations: LIBERO's
+    own protocol (each object in its own small region). Fully random layouts are kept as
+    layout="random" for a separate layout-generalisation evaluation.
   * spawn: LIBERO's floor scene spawns objects partly inside the floor; objects are
     re-seated SPAWN_CLEARANCE above it after every reset.
   * side camera: LIBERO's floor scene defines a camera nobody uses, `galleryview`. After
@@ -42,7 +41,7 @@ import mujoco
 import numpy as np
 from libero.libero.envs import OffScreenRenderEnv
 from libero.libero.envs.bddl_utils import get_problem_info
-from robosuite.utils.transform_utils import quat2axisangle
+from robosuite.utils.transform_utils import mat2quat, quat2axisangle, quat2mat
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BDDL = REPO_ROOT / "scenes" / "throw_ketchup_basket.bddl"
@@ -63,25 +62,39 @@ NOOP = np.array([0, 0, 0, 0, 0, 0, -1], dtype=np.float64)
 
 # Basket distance from the robot base along the throw direction (m). With the gripper
 # pointing down the hand reaches ~0.8 m at basket height: 0.70 is a place (or drop),
-# 0.80 is at the reach limit (stretched place or short toss), 0.90+ needs a throw; the
-# longest throw at OUTPUT_MAX 0.4 lands ~1.25 m. The policy has to pick the strategy, and
-# the throw strength, from what it sees. Which strategy each demo used is logged by teleop.
-TRAIN_BASKET_DISTANCES = (0.70, 0.80, 0.90, 1.00, 1.10, 1.20)
-# Held out: 0.75 / 0.85 around the place-throw boundary, 1.05 / 1.15 interpolation,
-# 1.25 extrapolation (needs strength ~0.99, the end of the range).
-EVAL_BASKET_DISTANCES = (0.75, 0.85, 1.05, 1.15, 1.25)
+# 0.80 is at the reach limit (stretched place or short toss), 0.90+ needs a throw. From the
+# ketchup's pick spot the in-basket windows (final calibration 2026-10-05) are 12-22 cm wide
+# up to 1.00 m; at 1.10 m the window is only 8 cm and at the strength ceiling, and teleop
+# throws there missed under normal grasp variation, so 1.00 is the farthest basket and there
+# is no extrapolation test. The policy has to pick the strategy, and the throw strength, from
+# what it sees. Which strategy each demo used is logged by teleop.
+TRAIN_BASKET_DISTANCES = (0.70, 0.80, 0.90, 1.00)
+# Held out: 0.75 / 0.85 around the place-throw boundary, 0.95 interpolation.
+EVAL_BASKET_DISTANCES = (0.75, 0.85, 0.95)
 PLACE_THROW_BOUNDARY = 0.85  # m; HUD hint only: below = probably place, above = throw
 
-# Clutter: these objects (those present in the scene) are placed uniformly at random in
-# PICK_AREA after every reset, with centres at least MIN_SEPARATION apart (object ~3-5 cm
-# half-width + open finger ~6 cm). The area is (forward, lateral) from the robot base in m:
-# within comfortable top-down reach, and kept well back from the nearest basket (0.70 m) so
-# the basket doesn't hide the clutter from agentview. The wind-up pose (0.25 m, 0.30 m up)
-# sits above the near edge; the throw rises before moving over, so the held object clears
-# the distractors. Distractors get a random yaw; the target keeps LIBERO's sampled yaw,
-# which grasps reliably with the gripper pointing straight down.
+# Clutter layout, as (forward, lateral) offsets from the robot base in m.
+# "spots" (default: demos and in-distribution eval): every object on its own spot, jittered
+# by SPOT_JITTER, orientations as LIBERO samples them (fixed) - LIBERO's protocol. The ketchup
+# sits in the middle between the milk and the BBQ sauce (a look-alike bottle); all centres are
+# >= 14 cm apart, so the open fingers (sideways) fit. A fixed pick spot also gives every throw
+# the same arm state at the wind-up: with random layouts the release lag depended on where
+# the ketchup had been picked from (calibration 2026-10-05).
+# "random" (layout-generalisation eval only): uniform positions in PICK_AREA, >= MIN_SEPARATION
+# apart, distractors with random yaw.
+# Both stay behind the nearest basket (0.70 m) so it doesn't hide the clutter from agentview;
+# the wind-up pose (0.25 m, 0.30 m up) sits above the near edge and the throw rises first.
 TARGET_OBJECT = "ketchup_1"
 PICK_OBJECTS = ("ketchup_1", "alphabet_soup_1", "cream_cheese_1", "milk_1", "bbq_sauce_1")
+LAYOUT_MODE = "spots"
+PICK_SPOTS = {
+    "ketchup_1": (0.36, 0.00),
+    "alphabet_soup_1": (0.30, -0.20),
+    "cream_cheese_1": (0.30, 0.20),
+    "milk_1": (0.44, -0.12),
+    "bbq_sauce_1": (0.44, 0.12),
+}
+SPOT_JITTER = 0.01  # m, uniform per axis
 PICK_AREA = ((0.27, 0.45), (-0.28, 0.28))
 MIN_SEPARATION = 0.12  # m between object centres
 PLACEMENT_TRIES = 200  # per object, before restarting the whole layout
@@ -90,19 +103,33 @@ PLACEMENT_TRIES = 200  # per object, before restarting the whole layout
 # scripts/calibrate_throw.py.
 THROW_ANGLE_DEG = 45.0
 WINDUP_OFFSET = np.array([0.25, 0.0, 0.30])  # grip-site wind-up position relative to the robot base (m)
-WINDUP_TOL = 0.02  # m
+GRASP_DEPTH_REF = 0.02  # m below the object's top: the default grasp in scripts/calibrate_throw.py
+# The sweep starts once the hand is this close to the wind-up pose. 1 cm: with 2 cm the start
+# point (and so the landing) varied by as much as a typical grasp offset does.
+WINDUP_TOL = 0.01  # m
 WINDUP_MAX_STEPS = 60
-# Release step 2 (calibration 2026-10-05): the +-1 gripper frees the object 3 steps after
-# the open command, i.e. at peak hand speed; landing is linear in strength (residual
-# 1.5 cm). Later steps release while the arm is already slowing near full extension.
-THROW_RELEASE_STEP = 2  # sweep step at which the gripper is commanded open
-# Push through the release (free flight starts 3 steps after the open command) plus one
-# step of margin, then brake. Longer follow-through only drives the empty hand towards
-# full extension, where the elbow has to spin far beyond the real Panda's joint limits.
-THROW_FOLLOW_STEPS = 5  # sweep steps that keep pushing after the release command
-# Landing distance (m from the robot base) vs strength at THROW_RELEASE_STEP, from
-# scripts/calibrate_throw.py (2026-10-05): land = 1.011 * strength + 0.251, max residual 1.5 cm.
-THROW_FIT = (1.011, 0.251)
+# Release timing: the gripper is commanded open at sweep step THROW_RELEASE_STEP; the object
+# leaves ~3 steps later (THROW_FREE_STEP), at peak hand speed. The sweep pushes for
+# THROW_SWEEP_STEPS steps, then brakes (longer follow-through only drives the empty hand
+# towards full extension, past the real elbow limit).
+# Release lag was bimodal in calibration with random clutter layouts (3 steps, or 5 with a
+# flat launch while braking), and the lag followed the layout, i.e. where the ketchup had
+# been picked from. Two other explanations were tested and ruled out: grip width (the gap
+# was 33.6 mm in every trial, so timing the command from it only made throws weaker) and
+# gripper yaw drift (the fingers opened sideways, 90 deg, in every trial). With the ketchup
+# on its own spot (LAYOUT_MODE "spots") the lag is 3 in 192 of 198 throws. The orientation
+# hold is kept because teleop uses it too.
+THROW_RELEASE_STEP = 2
+THROW_FREE_STEP = 5
+THROW_SWEEP_STEPS = THROW_FREE_STEP + 2
+GRIPPER_GAP_PER_STEP = 0.01  # m of finger-target gap per policy step at +-1 (robosuite PandaGripper)
+RELEASE_LAG_MARGIN = 0.25  # steps (gap-timed release only)
+# Final in-basket calibration (2026-10-05 18:24, spots layout, fixed release step 2, orientation
+# hold; outputs/calibration/20261005_182412.csv): in-basket strength windows 0.58-0.70 (0.80 m),
+# 0.68-0.82 (0.90 m), 0.78-1.00+ (1.00 m), 0.92-1.00 (1.10 m); window centres fit basket
+# distance = 0.896 * strength + 0.224 within 2.2 cm. (Aiming at the FLOOR landing point would be
+# biased: the object enters the basket above the floor.)
+THROW_FIT = (0.896, 0.224)
 
 
 def strength_for_distance(distance: float) -> float:
@@ -262,22 +289,27 @@ def sample_layout(n: int, rng=np.random) -> np.ndarray:
             return np.array(points)
 
 
-def arrange_pick_objects(env, rng=np.random) -> dict[str, tuple[float, float]]:
-    """Place the clutter objects at random in PICK_AREA (see above). Returns
-    {name: (forward, lateral)} offsets of their footprint centres from the robot base."""
+def arrange_pick_objects(env, mode: str = LAYOUT_MODE, rng=np.random) -> dict[str, tuple[float, float]]:
+    """Place the clutter objects: mode "spots" (own spot + small jitter) or "random" (see
+    above). Returns {name: (forward, lateral)} offsets of their footprint centres from the base."""
     inner = env.env
     m, d = inner.sim.model._model, inner.sim.data._data
     names = [n for n in PICK_OBJECTS if n in inner.objects_dict]
     if len(names) < 2:
         return {}
     base = robot_base(env)
-    layout = sample_layout(len(names), rng)
+    if mode == "spots":
+        layout = [np.array(PICK_SPOTS[n]) + rng.uniform(-SPOT_JITTER, SPOT_JITTER, size=2) for n in names]
+    elif mode == "random":
+        layout = sample_layout(len(names), rng)
+    else:
+        raise ValueError(f"unknown layout mode {mode!r}")
     placed = {}
     for name, target in zip(names, layout):
         bid = inner.obj_body_id[name]
         jnt = inner.objects_dict[name].joints[-1]
         q = np.array(inner.sim.data.get_joint_qpos(jnt))
-        if name != TARGET_OBJECT:  # random yaw about the vertical, object stays upright
+        if mode == "random" and name != TARGET_OBJECT:  # random yaw about the vertical, object stays upright
             yaw = rng.uniform(-np.pi, np.pi)
             new_quat = np.zeros(4)
             mujoco.mju_mulQuat(new_quat, np.array([np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)]), q[3:7])
@@ -295,12 +327,20 @@ def arrange_pick_objects(env, rng=np.random) -> dict[str, tuple[float, float]]:
     return placed
 
 
+def footprint_center(env, name: str) -> np.ndarray:
+    """(x, y) centre of an object's collision footprint, world frame."""
+    inner = env.env
+    corners = collision_corners(inner.sim.model._model, inner.sim.data._data, inner.obj_body_id[name])
+    return (corners[:, :2].max(axis=0) + corners[:, :2].min(axis=0)) / 2
+
+
 def apply_scene_fixes(env, pullback: float = AGENTVIEW_PULLBACK, basket_distance: float | None = None,
-                      basket_lateral: float = 0.0, arrange: bool = True) -> dict[str, tuple[float, float]]:
-    """Cameras, clutter arrangement, basket placement, floor seating. Returns the clutter layout."""
+                      basket_lateral: float = 0.0, layout: str | None = LAYOUT_MODE) -> dict[str, tuple[float, float]]:
+    """Cameras, clutter arrangement (layout mode, or None to leave LIBERO's), basket placement,
+    floor seating. Returns the clutter layout."""
     pull_back_agentview(env, pullback)
     place_side_camera(env)
-    layout = arrange_pick_objects(env) if arrange else {}
+    layout = arrange_pick_objects(env, layout) if layout else {}
     if basket_distance is not None:
         place_basket(env, basket_distance, basket_lateral)
     seat_on_floor(env)
@@ -309,11 +349,13 @@ def apply_scene_fixes(env, pullback: float = AGENTVIEW_PULLBACK, basket_distance
     return layout
 
 
-def reset_scene(env, project: bool = True, basket_distance: float | None = None, basket_lateral: float = 0.0):
-    """Reset, apply project fixes (optionally placing the basket), settle; returns the first observation."""
+def reset_scene(env, project: bool = True, basket_distance: float | None = None, basket_lateral: float = 0.0,
+                layout: str | None = LAYOUT_MODE):
+    """Reset, apply project fixes (clutter layout, optional basket placement), settle; returns
+    the first observation."""
     env.reset()
     if project:
-        apply_scene_fixes(env, basket_distance=basket_distance, basket_lateral=basket_lateral)
+        apply_scene_fixes(env, basket_distance=basket_distance, basket_lateral=basket_lateral, layout=layout)
     obs = None
     for _ in range(SETTLE_STEPS):
         obs, _, _, _ = env.step(NOOP)
@@ -388,31 +430,50 @@ def p_action(ee: np.ndarray, target: np.ndarray, gripper: float, gain: float = 1
     return a
 
 
+def orientation_action(current_quat: np.ndarray, target_quat: np.ndarray, gain: float = 1.0) -> np.ndarray:
+    """Rotation part of an action (3,) that turns the hand back to `target_quat`.
+
+    Quaternions are robosuite's (x, y, z, w), e.g. obs['robot0_eef_quat']. In relative OSC
+    mode a zero rotation means 'keep the current orientation', so wobble from fast moves is
+    never corrected; this servos it out, like p_action does for position. robosuite applies
+    the rotation delta in the world frame (goal = R(delta) @ current), hence R_target @ R_current^T.
+    """
+    r_err = quat2mat(target_quat) @ quat2mat(current_quat).T
+    return np.clip(gain * quat2axisangle(mat2quat(r_err)) / ROT_MAX, -1.0, 1.0)
+
+
 class ThrowPrimitive:
     """Scripted throw, executed one policy step at a time so callers can record each action.
 
     1. wind-up: servo the grip site to the wind-up pose (gripper closed);
     2. sweep: push at `strength` (fraction of full action) along the launch direction
-       (`angle_deg` above horizontal, `yaw_deg` around z, 0 = +x towards the basket);
-       the gripper is commanded open at sweep step `release_step` and the arm keeps
-       pushing for `follow_steps` more steps, so the object leaves the hand at speed;
+       (`angle_deg` above horizontal, `yaw_deg` around z, 0 = +x towards the basket) for
+       THROW_SWEEP_STEPS steps; the gripper is commanded open at sweep step `release_step`
+       (None: timed from the finger gap, see GRIPPER_GAP_PER_STEP);
     3. done: zero motion, gripper open.
 
+    If `hold_quat` is given (robosuite x, y, z, w), every action also servos the hand back to
+    that orientation, like teleop does, so its yaw can't drift during wind-up and sweep.
     Only plain +-1 gripper commands are used, exactly like teleop and the learned policy.
-    With +-1 the finger target sits deep inside the grasped object, so the fingers start
-    opening ~4 steps after the open command; release_step is calibrated for that.
     The reach guard stops pushing before the arm straightens into a singular pose.
+
+    Landing scatter between grasps (~5 cm std at 1.1 m, scripts/calibrate_throw.py
+    --grasp-depths/--grasp-dx) comes mostly from the release itself: with +-1 commands the
+    time the fingers take to let go depends on the object's width where it is held. Shifting
+    the wind-up by the grasp offset was tried and made no measurable difference.
     """
 
     def __init__(self, env, strength: float, angle_deg: float = THROW_ANGLE_DEG, yaw_deg: float = 0.0,
-                 release_step: int = THROW_RELEASE_STEP, follow_steps: int = THROW_FOLLOW_STEPS):
+                 release_step: int | None = THROW_RELEASE_STEP, hold_quat: np.ndarray | None = None):
         self.windup = robot_base(env) + WINDUP_OFFSET
         self.risen = False  # wind-up first rises to the wind-up height, then moves over
         ang, yaw = np.radians(angle_deg), np.radians(yaw_deg)
         unit = np.array([np.cos(yaw) * np.cos(ang), np.sin(yaw) * np.cos(ang), np.sin(ang)])
         self.push = float(np.clip(strength, 0.0, 1.0)) * unit / np.max(np.abs(unit))
-        self.release_step = release_step
-        self.follow_steps = follow_steps
+        self.adaptive = release_step is None
+        self.release_step = release_step  # adaptive: set from the finger gap when the sweep starts
+        self.grip_gap = None  # m, finger gap when the sweep started (for logging)
+        self.hold_quat = None if hold_quat is None else np.array(hold_quat, dtype=float)
         self.phase = "windup"
         self.windup_steps = 0
         self.sweep_step = 0
@@ -423,19 +484,32 @@ class ThrowPrimitive:
         return self.phase == "done"
 
     def next_action(self, env, obs) -> np.ndarray:
+        a = self._next_action(env, obs)
+        if self.hold_quat is not None and not self.done:
+            a[3:6] = orientation_action(obs["robot0_eef_quat"], self.hold_quat)
+        return a
+
+    def _next_action(self, env, obs) -> np.ndarray:
         ee = obs["robot0_eef_pos"]
         if self.phase == "windup":
             self.windup_steps += 1
+            windup = self.windup
             # Rise vertically before moving over, so the hanging object can't clip clutter.
-            if not self.risen and ee[2] < self.windup[2] - WINDUP_TOL and self.windup_steps <= WINDUP_MAX_STEPS:
-                return p_action(ee, np.array([ee[0], ee[1], self.windup[2]]), gripper=1.0)
+            if not self.risen and ee[2] < windup[2] - WINDUP_TOL and self.windup_steps <= WINDUP_MAX_STEPS:
+                return p_action(ee, np.array([ee[0], ee[1], windup[2]]), gripper=1.0)
             self.risen = True
-            if np.linalg.norm(self.windup - ee) > WINDUP_TOL and self.windup_steps <= WINDUP_MAX_STEPS:
-                return p_action(ee, self.windup, gripper=1.0)
+            if np.linalg.norm(windup - ee) > WINDUP_TOL and self.windup_steps <= WINDUP_MAX_STEPS:
+                return p_action(ee, windup, gripper=1.0)
             self.phase = "sweep"
         if self.phase == "sweep":
+            if self.grip_gap is None:  # first sweep step: time the release from how wide the grip is
+                q = obs["robot0_gripper_qpos"]
+                self.grip_gap = float(q[0] - q[1])
+                if self.adaptive:
+                    lag = int(np.ceil(self.grip_gap / GRIPPER_GAP_PER_STEP - RELEASE_LAG_MARGIN))
+                    self.release_step = max(0, THROW_FREE_STEP - lag)
             reach, _ = reach_info(env)
-            if reach < WRIST_REACH_LIMIT and self.sweep_step < self.release_step + self.follow_steps:
+            if reach < WRIST_REACH_LIMIT and self.sweep_step < THROW_SWEEP_STEPS:
                 a = np.zeros(7)
                 a[:3] = self.push
                 self.release_commanded = self.sweep_step >= self.release_step
