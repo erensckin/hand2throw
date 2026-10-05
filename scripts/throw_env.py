@@ -19,6 +19,10 @@ What it fixes relative to stock LIBERO (see PROJECT_NOTES.md for the reasoning):
     global registries by the BDDL problem name (TASK_MAPPING, REGION_SAMPLERS, ...), so a
     new problem name would have to be patched into all of them. Editing an existing
     camera's pose at runtime, like the agentview pull-back, needs none of that.
+  * basket distance: optionally re-placed after reset at a given distance in front of
+    the robot (TRAIN/EVAL_BASKET_DISTANCES).
+
+It also holds the throw primitive used by shared-autonomy teleop (ThrowPrimitive).
 """
 
 import os
@@ -47,6 +51,26 @@ SPAWN_CLEARANCE = 0.01  # m above the floor
 SETTLE_STEPS = 10
 WRIST_REACH_LIMIT = 0.66  # shoulder->wrist distance (m) beyond which the OSC heads for a singularity
 NOOP = np.array([0, 0, 0, 0, 0, 0, -1], dtype=np.float64)
+
+# Basket distance from the robot base along the throw direction (m). Reach is ~0.9 m,
+# the longest throw at OUTPUT_MAX 0.4 lands ~1.28 m.
+TRAIN_BASKET_DISTANCES = (1.00, 1.10, 1.20)
+EVAL_BASKET_DISTANCES = (1.05, 1.15, 1.25)  # held out: interpolation (1.05, 1.15), extrapolation (1.25)
+
+# Throw primitive (see ThrowPrimitive). Values for release step are set by
+# scripts/calibrate_throw.py.
+THROW_ANGLE_DEG = 45.0
+WINDUP_OFFSET = np.array([0.25, 0.0, 0.30])  # grip-site wind-up position relative to the robot base (m)
+WINDUP_TOL = 0.02  # m
+WINDUP_MAX_STEPS = 60
+# Release step 2 (calibration 2026-10-05): the +-1 gripper frees the object 3 steps after
+# the open command, i.e. at peak hand speed; landing is linear in strength (residual
+# 1.5 cm). Later steps release while the arm is already slowing near full extension.
+THROW_RELEASE_STEP = 2  # sweep step at which the gripper is commanded open
+# Push through the release (free flight starts 3 steps after the open command) plus one
+# step of margin, then brake. Longer follow-through only drives the empty hand towards
+# full extension, where the elbow has to spin far beyond the real Panda's joint limits.
+THROW_FOLLOW_STEPS = 5  # sweep steps that keep pushing after the release command
 
 # Side camera = LIBERO's floor-scene `galleryview`, re-posed after every reset. It looks
 # along +y from the -y side, tilted 12 deg down, image right = world +x (a 78 deg rotation
@@ -159,18 +183,44 @@ def seat_on_floor(env, clearance: float = SPAWN_CLEARANCE) -> None:
         inner.sim.forward()
 
 
-def apply_scene_fixes(env, pullback: float = AGENTVIEW_PULLBACK) -> None:
+def robot_base(env) -> np.ndarray:
+    robot = env.env.robots[0]
+    return env.env.sim.data.get_body_xpos(f"{robot.robot_model.naming_prefix}base").copy()
+
+
+def place_basket(env, distance: float, lateral: float = 0.0, name: str = "basket_1") -> None:
+    """Move the basket so its footprint centre is `distance` in front of the robot base
+    (+x, the throw direction) and `lateral` to the side (+y). Height is fixed by seat_on_floor."""
+    inner = env.env
+    m, d = inner.sim.model._model, inner.sim.data._data
+    bid = inner.obj_body_id[name]
+    jnt = inner.objects_dict[name].joints[-1]
+    corners = collision_corners(m, d, bid)
+    center = (corners[:, :2].max(axis=0) + corners[:, :2].min(axis=0)) / 2
+    base = robot_base(env)
+    q = np.array(inner.sim.data.get_joint_qpos(jnt))
+    q[0] += base[0] + distance - center[0]
+    q[1] += base[1] + lateral - center[1]
+    inner.sim.data.set_joint_qpos(jnt, q)
+    inner.sim.data.set_joint_qvel(jnt, np.zeros(6))
+    inner.sim.forward()
+
+
+def apply_scene_fixes(env, pullback: float = AGENTVIEW_PULLBACK, basket_distance: float | None = None,
+                      basket_lateral: float = 0.0) -> None:
     pull_back_agentview(env, pullback)
     place_side_camera(env)
+    if basket_distance is not None:
+        place_basket(env, basket_distance, basket_lateral)
     seat_on_floor(env)
     env.sim.forward()  # propagate the camera / object edits before anything is rendered
 
 
-def reset_scene(env, project: bool = True):
-    """Reset, apply project fixes, settle; returns the first observation."""
+def reset_scene(env, project: bool = True, basket_distance: float | None = None, basket_lateral: float = 0.0):
+    """Reset, apply project fixes (optionally placing the basket), settle; returns the first observation."""
     env.reset()
     if project:
-        apply_scene_fixes(env)
+        apply_scene_fixes(env, basket_distance=basket_distance, basket_lateral=basket_lateral)
     obs = None
     for _ in range(SETTLE_STEPS):
         obs, _, _, _ = env.step(NOOP)
@@ -207,3 +257,68 @@ def reach_info(env) -> tuple[float, np.ndarray]:
 def object_positions(env) -> dict[str, np.ndarray]:
     inner = env.env
     return {n: inner.sim.data.body_xpos[b].copy() for n, b in inner.obj_body_id.items()}
+
+
+def p_action(ee: np.ndarray, target: np.ndarray, gripper: float, gain: float = 1.0) -> np.ndarray:
+    """Servo the grip site towards `target`: action = gain * error / OUTPUT_MAX (clipped).
+
+    In relative OSC mode a zero action means 'goal = where the hand is now', so holding a
+    position also needs this servo, or drift is never corrected.
+    """
+    a = np.zeros(7)
+    a[:3] = np.clip(gain * (target - ee) / OUTPUT_MAX, -1.0, 1.0)
+    a[6] = gripper
+    return a
+
+
+class ThrowPrimitive:
+    """Scripted throw, executed one policy step at a time so callers can record each action.
+
+    1. wind-up: servo the grip site to the wind-up pose (gripper closed);
+    2. sweep: push at `strength` (fraction of full action) along the launch direction
+       (`angle_deg` above horizontal, `yaw_deg` around z, 0 = +x towards the basket);
+       the gripper is commanded open at sweep step `release_step` and the arm keeps
+       pushing for `follow_steps` more steps, so the object leaves the hand at speed;
+    3. done: zero motion, gripper open.
+
+    Only plain +-1 gripper commands are used, exactly like teleop and the learned policy.
+    With +-1 the finger target sits deep inside the grasped object, so the fingers start
+    opening ~4 steps after the open command; release_step is calibrated for that.
+    The reach guard stops pushing before the arm straightens into a singular pose.
+    """
+
+    def __init__(self, env, strength: float, angle_deg: float = THROW_ANGLE_DEG, yaw_deg: float = 0.0,
+                 release_step: int = THROW_RELEASE_STEP, follow_steps: int = THROW_FOLLOW_STEPS):
+        self.windup = robot_base(env) + WINDUP_OFFSET
+        ang, yaw = np.radians(angle_deg), np.radians(yaw_deg)
+        unit = np.array([np.cos(yaw) * np.cos(ang), np.sin(yaw) * np.cos(ang), np.sin(ang)])
+        self.push = float(np.clip(strength, 0.0, 1.0)) * unit / np.max(np.abs(unit))
+        self.release_step = release_step
+        self.follow_steps = follow_steps
+        self.phase = "windup"
+        self.windup_steps = 0
+        self.sweep_step = 0
+        self.release_commanded = False
+
+    @property
+    def done(self) -> bool:
+        return self.phase == "done"
+
+    def next_action(self, env, obs) -> np.ndarray:
+        ee = obs["robot0_eef_pos"]
+        if self.phase == "windup":
+            self.windup_steps += 1
+            if np.linalg.norm(self.windup - ee) > WINDUP_TOL and self.windup_steps <= WINDUP_MAX_STEPS:
+                return p_action(ee, self.windup, gripper=1.0)
+            self.phase = "sweep"
+        if self.phase == "sweep":
+            reach, _ = reach_info(env)
+            if reach < WRIST_REACH_LIMIT and self.sweep_step < self.release_step + self.follow_steps:
+                a = np.zeros(7)
+                a[:3] = self.push
+                self.release_commanded = self.sweep_step >= self.release_step
+                a[6] = -1.0 if self.release_commanded else 1.0
+                self.sweep_step += 1
+                return a
+            self.phase = "done"
+        return NOOP.copy()
