@@ -121,7 +121,9 @@ def pick(run: Runner) -> tuple[bool, str]:
     for _ in range(CLOSE_STEPS):
         run.step(throw_env.p_action(run.obs["robot0_eef_pos"], grasp, 1.0))
     z0 = object_state(env)[0][2]
-    go_to(run, throw_env.robot_base(env) + throw_env.WINDUP_OFFSET, 1.0, tol=throw_env.WINDUP_TOL)
+    windup = throw_env.robot_base(env) + throw_env.WINDUP_OFFSET
+    go_to(run, np.array([*center, windup[2]]), 1.0, tol=throw_env.WINDUP_TOL)  # rise clear of the clutter
+    go_to(run, windup, 1.0, tol=throw_env.WINDUP_TOL)
     rose = object_state(env)[0][2] - z0
     return rose > 0.05, f"object rose only {rose * 100:.1f} cm"
 

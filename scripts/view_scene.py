@@ -10,6 +10,7 @@ Usage (from the repo root):
     uv run python scripts/view_scene.py --bddl scenes/my_scene.bddl --episode-steps 100
     uv run python scripts/view_scene.py --suite libero_spatial --task-id 0 --cams
     uv run python scripts/view_scene.py --bddl scenes/throw_ketchup_basket.bddl --project --cams
+    uv run python scripts/view_scene.py --bddl scenes/throw_ketchup_basket.bddl --project --cams --basket 1.25
 
 --project applies the throwing-task settings from throw_env.py (raised controller
 speed, pulled-back agentview, objects re-seated on the floor).
@@ -76,6 +77,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--project", action="store_true", help="apply the throwing-task settings from throw_env.py")
     p.add_argument("--pullback", type=float, default=throw_env.AGENTVIEW_PULLBACK,
                    help="with --project: how far to pull agentview back along its viewing axis (m)")
+    p.add_argument("--basket", type=float, default=None,
+                   help="with --project: place the basket this far in front of the robot base (m)")
     return p.parse_args()
 
 
@@ -166,7 +169,7 @@ def main() -> None:
             obs = env.set_init_state(init_states[k])
             print(f"[reset] init state {k}/{len(init_states)}")
         if args.project:
-            throw_env.apply_scene_fixes(env, pullback=args.pullback)
+            throw_env.apply_scene_fixes(env, pullback=args.pullback, basket_distance=args.basket)
         for _ in range(SETTLE_STEPS):
             obs, _, _, _ = env.step(NOOP)
         episode["idx"] += 1

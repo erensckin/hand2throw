@@ -7,8 +7,14 @@ when you run `uv run python scripts/<name>.py`).
 What it fixes relative to stock LIBERO (see PROJECT_NOTES.md for the reasoning):
   * controller: translational output_max raised from 0.05 to OUTPUT_MAX m/step so the
     arm can throw (~1.7-2 m/s); everything else is LIBERO's default OSC_POSE.
-  * agentview camera: pulled back along its own viewing axis so the far basket is in
-    frame (same viewing angle, objects just appear smaller).
+  * agentview camera: LIBERO's stock floor-scene pose (no pull-back by default), i.e. the
+    exact camera1 view smolvla_libero saw for libero_object. It covers the pick area and
+    the clutter; the side camera covers the basket and the throw.
+  * clutter: after every reset the ketchup and four distractors are placed uniformly at
+    random in a pick area in front of the robot (no overlaps, room for the open fingers),
+    distractors with random yaw, so the layout and the ketchup's position change every
+    episode and the instruction actually matters. (LIBERO itself samples each object in
+    its own ~5 cm region, i.e. a near-fixed layout per task.)
   * spawn: LIBERO's floor scene spawns objects partly inside the floor; objects are
     re-seated SPAWN_CLEARANCE above it after every reset.
   * side camera: LIBERO's floor scene defines a camera nobody uses, `galleryview`. After
@@ -46,16 +52,39 @@ OUTPUT_MAX = 0.4  # m per policy step at action = 1 (LIBERO default 0.05) -- fro
 ROT_MAX = 0.5  # rad per policy step (LIBERO default)
 KP = 150.0  # OSC stiffness (LIBERO default)
 CAMERA_SIZE = 256  # same as lerobot/libero
-AGENTVIEW_PULLBACK = 0.5  # m, along the agentview camera's viewing axis
+# m, along agentview's own viewing axis. 0 = LIBERO's stock floor-scene view (in-distribution
+# for smolvla_libero); pulling back keeps the angle and makes everything smaller.
+AGENTVIEW_PULLBACK = 0.0
 SPAWN_CLEARANCE = 0.01  # m above the floor
 SETTLE_STEPS = 10
 WRIST_REACH_LIMIT = 0.66  # shoulder->wrist distance (m) beyond which the OSC heads for a singularity
+TELEOP_REACH_LIMIT = 0.62  # teleop targets are clamped to this, a little inside the guard
 NOOP = np.array([0, 0, 0, 0, 0, 0, -1], dtype=np.float64)
 
-# Basket distance from the robot base along the throw direction (m). Reach is ~0.9 m,
-# the longest throw at OUTPUT_MAX 0.4 lands ~1.28 m.
-TRAIN_BASKET_DISTANCES = (1.00, 1.10, 1.20)
-EVAL_BASKET_DISTANCES = (1.05, 1.15, 1.25)  # held out: interpolation (1.05, 1.15), extrapolation (1.25)
+# Basket distance from the robot base along the throw direction (m). With the gripper
+# pointing down the hand reaches ~0.8 m at basket height: 0.70 is a place (or drop),
+# 0.80 is at the reach limit (stretched place or short toss), 0.90+ needs a throw; the
+# longest throw at OUTPUT_MAX 0.4 lands ~1.25 m. The policy has to pick the strategy, and
+# the throw strength, from what it sees. Which strategy each demo used is logged by teleop.
+TRAIN_BASKET_DISTANCES = (0.70, 0.80, 0.90, 1.00, 1.10, 1.20)
+# Held out: 0.75 / 0.85 around the place-throw boundary, 1.05 / 1.15 interpolation,
+# 1.25 extrapolation (needs strength ~0.99, the end of the range).
+EVAL_BASKET_DISTANCES = (0.75, 0.85, 1.05, 1.15, 1.25)
+PLACE_THROW_BOUNDARY = 0.85  # m; HUD hint only: below = probably place, above = throw
+
+# Clutter: these objects (those present in the scene) are placed uniformly at random in
+# PICK_AREA after every reset, with centres at least MIN_SEPARATION apart (object ~3-5 cm
+# half-width + open finger ~6 cm). The area is (forward, lateral) from the robot base in m:
+# within comfortable top-down reach, and kept well back from the nearest basket (0.70 m) so
+# the basket doesn't hide the clutter from agentview. The wind-up pose (0.25 m, 0.30 m up)
+# sits above the near edge; the throw rises before moving over, so the held object clears
+# the distractors. Distractors get a random yaw; the target keeps LIBERO's sampled yaw,
+# which grasps reliably with the gripper pointing straight down.
+TARGET_OBJECT = "ketchup_1"
+PICK_OBJECTS = ("ketchup_1", "alphabet_soup_1", "cream_cheese_1", "milk_1", "bbq_sauce_1")
+PICK_AREA = ((0.27, 0.45), (-0.28, 0.28))
+MIN_SEPARATION = 0.12  # m between object centres
+PLACEMENT_TRIES = 200  # per object, before restarting the whole layout
 
 # Throw primitive (see ThrowPrimitive). Values for release step are set by
 # scripts/calibrate_throw.py.
@@ -71,13 +100,23 @@ THROW_RELEASE_STEP = 2  # sweep step at which the gripper is commanded open
 # step of margin, then brake. Longer follow-through only drives the empty hand towards
 # full extension, where the elbow has to spin far beyond the real Panda's joint limits.
 THROW_FOLLOW_STEPS = 5  # sweep steps that keep pushing after the release command
+# Landing distance (m from the robot base) vs strength at THROW_RELEASE_STEP, from
+# scripts/calibrate_throw.py (2026-10-05): land = 1.011 * strength + 0.251, max residual 1.5 cm.
+THROW_FIT = (1.011, 0.251)
+
+
+def strength_for_distance(distance: float) -> float:
+    """Throw strength that lands the object `distance` m from the robot base (calibration fit)."""
+    slope, intercept = THROW_FIT
+    return float(np.clip((distance - intercept) / slope, 0.0, 1.0))
 
 # Side camera = LIBERO's floor-scene `galleryview`, re-posed after every reset. It looks
 # along +y from the -y side, tilted 12 deg down, image right = world +x (a 78 deg rotation
-# about x; MuJoCo cameras look along their -z axis). Frames x from the robot base (-0.6)
-# to past the basket (~0.7).
+# about x; MuJoCo cameras look along their -z axis). At 1.94 m from the scene plane with
+# fovy 45 it frames x ~ -0.77 .. +0.83 (behind the robot base to past the far rim of a
+# basket at 1.25 m) and z ~ -0.40 .. +1.20 around a centre at (0.03, 0, 0.40).
 SIDE_CAMERA = "galleryview"
-SIDE_CAMERA_POS = [-0.02, -1.71, 0.71]
+SIDE_CAMERA_POS = [0.03, -1.90, 0.80]
 SIDE_CAMERA_QUAT = [0.7771, 0.6293, 0.0, 0.0]  # w, x, y, z
 SIDE_CAMERA_FOVY = 45.0  # deg
 
@@ -206,14 +245,68 @@ def place_basket(env, distance: float, lateral: float = 0.0, name: str = "basket
     inner.sim.forward()
 
 
+def sample_layout(n: int, rng=np.random) -> np.ndarray:
+    """n points uniform in PICK_AREA with pairwise distance >= MIN_SEPARATION (rejection sampling)."""
+    (f_lo, f_hi), (l_lo, l_hi) = PICK_AREA
+    while True:
+        points = []
+        for _ in range(n):
+            for _ in range(PLACEMENT_TRIES):
+                p = np.array([rng.uniform(f_lo, f_hi), rng.uniform(l_lo, l_hi)])
+                if all(np.linalg.norm(p - q) >= MIN_SEPARATION for q in points):
+                    points.append(p)
+                    break
+            else:
+                break  # this object didn't fit: restart the whole layout
+        if len(points) == n:
+            return np.array(points)
+
+
+def arrange_pick_objects(env, rng=np.random) -> dict[str, tuple[float, float]]:
+    """Place the clutter objects at random in PICK_AREA (see above). Returns
+    {name: (forward, lateral)} offsets of their footprint centres from the robot base."""
+    inner = env.env
+    m, d = inner.sim.model._model, inner.sim.data._data
+    names = [n for n in PICK_OBJECTS if n in inner.objects_dict]
+    if len(names) < 2:
+        return {}
+    base = robot_base(env)
+    layout = sample_layout(len(names), rng)
+    placed = {}
+    for name, target in zip(names, layout):
+        bid = inner.obj_body_id[name]
+        jnt = inner.objects_dict[name].joints[-1]
+        q = np.array(inner.sim.data.get_joint_qpos(jnt))
+        if name != TARGET_OBJECT:  # random yaw about the vertical, object stays upright
+            yaw = rng.uniform(-np.pi, np.pi)
+            new_quat = np.zeros(4)
+            mujoco.mju_mulQuat(new_quat, np.array([np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)]), q[3:7])
+            q[3:7] = new_quat
+            inner.sim.data.set_joint_qpos(jnt, q)
+            inner.sim.forward()
+        corners = collision_corners(m, d, bid)  # after the rotation
+        center = (corners[:, :2].max(axis=0) + corners[:, :2].min(axis=0)) / 2
+        q = np.array(inner.sim.data.get_joint_qpos(jnt))
+        q[:2] += base[:2] + target - center
+        inner.sim.data.set_joint_qpos(jnt, q)
+        inner.sim.data.set_joint_qvel(jnt, np.zeros(6))
+        inner.sim.forward()
+        placed[name] = (round(float(target[0]), 3), round(float(target[1]), 3))
+    return placed
+
+
 def apply_scene_fixes(env, pullback: float = AGENTVIEW_PULLBACK, basket_distance: float | None = None,
-                      basket_lateral: float = 0.0) -> None:
+                      basket_lateral: float = 0.0, arrange: bool = True) -> dict[str, tuple[float, float]]:
+    """Cameras, clutter arrangement, basket placement, floor seating. Returns the clutter layout."""
     pull_back_agentview(env, pullback)
     place_side_camera(env)
+    layout = arrange_pick_objects(env) if arrange else {}
     if basket_distance is not None:
         place_basket(env, basket_distance, basket_lateral)
     seat_on_floor(env)
     env.sim.forward()  # propagate the camera / object edits before anything is rendered
+    env._clutter_layout = layout  # read back by callers that want to log it
+    return layout
 
 
 def reset_scene(env, project: bool = True, basket_distance: float | None = None, basket_lateral: float = 0.0):
@@ -242,6 +335,30 @@ def state8(obs) -> np.ndarray:
     return np.concatenate(
         [obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"]]
     ).astype(np.float32)
+
+
+def arm_points(env) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """World positions of the shoulder (joint 2), wrist (joint 6) and grip site."""
+    robot = env.env.robots[0]
+    pf = robot.robot_model.naming_prefix
+    data = env.env.sim.data
+    return (data.get_body_xpos(f"{pf}link2").copy(), data.get_body_xpos(f"{pf}link6").copy(),
+            data.site_xpos[robot.eef_site_id].copy())
+
+
+def clamp_to_reach(env, target: np.ndarray, limit: float = TELEOP_REACH_LIMIT) -> np.ndarray:
+    """Pull a grip-site target back inside comfortable reach (wrist within `limit` of the
+    shoulder). Uses the current wrist-to-grip offset, i.e. assumes the hand keeps its
+    orientation, which holds in teleop (rotation is never commanded); joint 7 can still
+    move the wrist by a few cm around the hand axis, so this is approximate and the
+    action-level reach guard stays as the hard stop."""
+    shoulder, wrist, grip = arm_points(env)
+    offset = wrist - grip
+    v = target + offset - shoulder
+    dist = float(np.linalg.norm(v))
+    if dist <= limit:
+        return target
+    return shoulder + v * (limit / dist) - offset
 
 
 def reach_info(env) -> tuple[float, np.ndarray]:
@@ -290,6 +407,7 @@ class ThrowPrimitive:
     def __init__(self, env, strength: float, angle_deg: float = THROW_ANGLE_DEG, yaw_deg: float = 0.0,
                  release_step: int = THROW_RELEASE_STEP, follow_steps: int = THROW_FOLLOW_STEPS):
         self.windup = robot_base(env) + WINDUP_OFFSET
+        self.risen = False  # wind-up first rises to the wind-up height, then moves over
         ang, yaw = np.radians(angle_deg), np.radians(yaw_deg)
         unit = np.array([np.cos(yaw) * np.cos(ang), np.sin(yaw) * np.cos(ang), np.sin(ang)])
         self.push = float(np.clip(strength, 0.0, 1.0)) * unit / np.max(np.abs(unit))
@@ -308,6 +426,10 @@ class ThrowPrimitive:
         ee = obs["robot0_eef_pos"]
         if self.phase == "windup":
             self.windup_steps += 1
+            # Rise vertically before moving over, so the hanging object can't clip clutter.
+            if not self.risen and ee[2] < self.windup[2] - WINDUP_TOL and self.windup_steps <= WINDUP_MAX_STEPS:
+                return p_action(ee, np.array([ee[0], ee[1], self.windup[2]]), gripper=1.0)
+            self.risen = True
             if np.linalg.norm(self.windup - ee) > WINDUP_TOL and self.windup_steps <= WINDUP_MAX_STEPS:
                 return p_action(ee, self.windup, gripper=1.0)
             self.phase = "sweep"
