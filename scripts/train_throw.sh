@@ -18,7 +18,9 @@
 # - train only the action expert (VLM and vision encoder frozen): LeRobot's default for
 #   SmolVLA fine-tuning, fits 16 GB, and limits overfitting on ~60 demos;
 # - LR schedule: smolvla_libero's cosine-with-warmup preset (decay over 25k steps) is rescaled
-#   automatically by LeRobot to the run length when the run is shorter.
+#   automatically by LeRobot to the run length when the run is shorter;
+# - episodes: scripts/select_episodes.py keeps only successful demos with the strategy expected
+#   for their distance (place at 0.70 m, throw from 0.80 m), via --dataset.episodes.
 set -euo pipefail
 
 MODE=${1:-full}
@@ -32,6 +34,8 @@ WORKERS=${WORKERS:-8}
 
 RENAME='{"observation.images.image": "observation.images.camera1", "observation.images.image2": "observation.images.camera2", "observation.images.image3": "observation.images.camera3"}'
 
+EPISODES=$(uv run python scripts/select_episodes.py)
+echo "training on episodes: $EPISODES"
 echo "mode=$MODE steps=$STEPS batch=$BATCH workers=$WORKERS save_freq=$SAVE_FREQ out=$OUT"
 uv run lerobot-train \
   --policy.path=lerobot/smolvla_libero \
@@ -40,6 +44,7 @@ uv run lerobot-train \
   --policy.freeze_vision_encoder=true \
   --dataset.repo_id=local/throw_ketchup \
   --dataset.root=data/throw_ketchup \
+  --dataset.episodes="$EPISODES" \
   --rename_map="$RENAME" \
   --batch_size="$BATCH" \
   --num_workers="$WORKERS" \

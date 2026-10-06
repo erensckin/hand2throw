@@ -12,6 +12,11 @@ Per basket distance it runs N episodes and records:
     thrown       ketchup moved faster than 1 m/s (a throw, in hand or in flight)
     rest error   where it came to rest relative to the basket centre (along / lateral, cm)
     rest dist    how far from the robot base it came to rest (m)
+    peak action  largest commanded translation |a[:3]| while holding the ketchup: the policy's
+                 own throw strength (the demos' scripted sweep is strength * sqrt(2), i.e.
+                 0.91 / 1.07 / 1.22 at 0.80 / 0.90 / 1.00 m)
+    release      steps between that peak and the first open command after it (demos: the
+                 open command comes 2 sweep steps in, at full push)
 and prints a per-distance table plus a strength-modulation check: the slope of rest
 distance vs basket distance over thrown episodes (1 = lands where the basket is, 0 = throws
 the same at every distance).
@@ -96,6 +101,7 @@ def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video
     writer = None
     lifted = thrown = False
     max_speed = 0.0
+    peak_action, peak_step, release_step = 0.0, None, None
     success_steps = settle = 0
     t0 = time.perf_counter()
     step = 0
@@ -103,6 +109,12 @@ def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video
         with torch.inference_mode():
             action = policy.select_action(pre(make_batch(obs, task)))
         action = post(action).to("cpu").numpy().reshape(-1)
+        if lifted:  # the policy's own throw: how hard it pushes and when it lets go
+            push = float(np.linalg.norm(action[:3]))
+            if push > peak_action:
+                peak_action, peak_step, release_step = push, step, None
+            if release_step is None and peak_step is not None and action[6] < 0:
+                release_step = step
         obs, _, _, _ = env.step(action)
 
         if video_path is not None:
@@ -135,6 +147,8 @@ def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video
         "basket": distance, "layout": layout, "success": bool(env.check_success()), "grasped": lifted,
         "thrown": thrown, "max_speed": round(max_speed, 2), "rest_dist": round(float(pos[0] - base[0]), 3),
         "rest_err_along_cm": round(float(err[0]) * 100, 1), "rest_err_lateral_cm": round(float(err[1]) * 100, 1),
+        "peak_action": round(peak_action, 3),
+        "release_after_peak": None if release_step is None or peak_step is None else release_step - peak_step,
         "steps": step, "wall_s": round(time.perf_counter() - t0, 1),
     }
 
@@ -165,6 +179,23 @@ def summarize(rows: list[dict]) -> dict:
               f"{along_txt}          {lat_txt}       {s['steps_mean']:5.0f}{tag}")
 
     thrown = [r for r in rows if r["thrown"]]
+    if thrown:
+        print("\nThrow execution (thrown episodes): policy peak action vs the demos' scripted sweep")
+        print("basket  n   peak action (policy)   demo sweep   release after peak (steps)")
+        for d in sorted({r["basket"] for r in thrown}):
+            rs = [r for r in thrown if r["basket"] == d]
+            peaks = np.array([r["peak_action"] for r in rs])
+            rel = [r["release_after_peak"] for r in rs if r["release_after_peak"] is not None]
+            demo = throw_env.strength_for_distance(d) * np.sqrt(2)
+            rel_txt = f"{np.mean(rel):+5.1f} +- {np.std(rel):3.1f}" if rel else "    -"
+            print(f"{d:5.2f}  {len(rs):3d}   {peaks.mean():5.2f} +- {peaks.std():4.2f}          {demo:5.2f}        {rel_txt}")
+        b = np.array([r["basket"] for r in thrown])
+        pk = np.array([r["peak_action"] for r in thrown])
+        if len(set(b)) >= 2:
+            summary["peak_action_vs_basket"] = {"slope": float(np.polyfit(b, pk, 1)[0]),
+                                                "corr": float(np.corrcoef(b, pk)[0, 1])}
+            print(f"Peak action vs basket distance: r = {summary['peak_action_vs_basket']['corr']:.2f} "
+                  f"(how cleanly the policy's chosen strength tracks the basket, before execution noise)")
     if len({r["basket"] for r in thrown}) >= 2:
         b = np.array([r["basket"] for r in thrown])
         land = np.array([r["rest_dist"] for r in thrown])

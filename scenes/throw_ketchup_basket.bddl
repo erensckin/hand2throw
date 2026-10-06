@@ -1,6 +1,6 @@
 (define (problem LIBERO_Floor_Manipulation)
   (:domain robosuite)
-  (:language Throw the ketchup into the basket)
+  (:language Put the ketchup in the basket)
     (:regions
       (bin_region
           (:target floor)

@@ -758,6 +758,8 @@ def main() -> None:
                     if not st["recording"] and ds is not None:
                         st["recording"] = True
                         raw.start()
+            elif key == THROW_KEY and st["basket"] < 0.775:
+                print("[throw] ignored: this basket is within reach, place it by hand")
             elif key == THROW_KEY and st["throw"] is None and st["thrown"] is None:
                 distance = st["basket"]  # true distance: privileged, demonstrator only
                 strength = throw_env.strength_for_distance(distance)
