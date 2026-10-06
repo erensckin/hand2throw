@@ -9,7 +9,9 @@ the same pipeline lerobot-eval uses: preprocessor -> select_action -> postproces
 Per basket distance it runs N episodes and records:
     success      ketchup in the basket (LIBERO's predicate, held 0.5 s)
     grasped      ketchup lifted > 5 cm at some point
-    thrown       ketchup moved faster than 1 m/s (a throw, in hand or in flight)
+    thrown       the policy pushed hard while holding the ketchup (peak commanded translation
+                 > 0.5; the demos' throw sweeps are 0.91-1.22, placing ~0.13). Object speed is
+                 not used: a ketchup dropped into the basket from hand height also exceeds 1 m/s
     rest error   where it came to rest relative to the basket centre (along / lateral, cm)
     rest dist    how far from the robot base it came to rest (m)
     peak action  largest commanded translation |a[:3]| while holding the ketchup: the policy's
@@ -22,9 +24,14 @@ distance vs basket distance over thrown episodes (1 = lands where the basket is,
 the same at every distance).
 
 Usage (from the repo root):
+    uv run python scripts/eval_throw.py --summarize outputs/eval/<name>/episodes.csv   # re-score saved results
     uv run python scripts/eval_throw.py --policy outputs/train/<run>/checkpoints/last/pretrained_model
     uv run python scripts/eval_throw.py --policy ... --distances 0.8,0.9,1.0 --episodes 20
+    uv run python scripts/eval_throw.py --policy ... --distances 0.70:1.00:0.025 --episodes 5   # continuous sweep
     uv run python scripts/eval_throw.py --policy ... --layout random       # layout generalisation
+    # the pretrained policy before our post-training, in its own action scale and wording:
+    uv run python scripts/eval_throw.py --policy lerobot/smolvla_libero --output-max 0.05 \
+        --task "pick up the ketchup and place it in the basket" --name pretrained_baseline
 Results: outputs/eval/<name>/episodes.csv, summary.json, videos/.
 """
 
@@ -51,7 +58,8 @@ RENAME = {
     "observation.images.image3": "observation.images.camera3",
 }
 LIFT_HEIGHT = 0.05  # m above its resting height: counts as grasped
-THROW_SPEED = 1.0  # m/s: counts as thrown
+THROW_SPEED = 1.0  # m/s: the ketchup is moving fast (thrown or dropped): wait for it to settle
+THROW_ACTION = 0.5  # peak commanded translation while holding: counts as a throw
 SETTLE_SPEED = 0.05  # m/s
 SETTLE_STEPS = 5
 SUCCESS_HOLD = 10  # steps (0.5 s), like teleop's auto-save
@@ -99,7 +107,7 @@ def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video
     base = throw_env.robot_base(env)
     z0 = float(inner.sim.data.body_xpos[bid][2])
     writer = None
-    lifted = thrown = False
+    lifted = moved_fast = False
     max_speed = 0.0
     peak_action, peak_step, release_step = 0.0, None, None
     success_steps = settle = 0
@@ -130,11 +138,11 @@ def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video
         speed = float(np.linalg.norm(inner.sim.data.get_joint_qvel(jnt)[:3]))
         max_speed = max(max_speed, speed)
         lifted |= bool(pos[2] > z0 + LIFT_HEIGHT)
-        thrown |= bool(lifted and speed > THROW_SPEED)
+        moved_fast |= bool(lifted and speed > THROW_SPEED)
         success_steps = success_steps + 1 if env.check_success() else 0
         if success_steps >= SUCCESS_HOLD:
             break
-        if thrown:  # after a throw, stop once the ketchup lies still
+        if moved_fast:  # after a throw or drop, stop once the ketchup lies still
             settle = settle + 1 if speed < SETTLE_SPEED else 0
             if settle >= SETTLE_STEPS:
                 break
@@ -145,7 +153,7 @@ def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video
     err = pos[:2] - throw_env.footprint_center(env, "basket_1")
     return {
         "basket": distance, "layout": layout, "success": bool(env.check_success()), "grasped": lifted,
-        "thrown": thrown, "max_speed": round(max_speed, 2), "rest_dist": round(float(pos[0] - base[0]), 3),
+        "thrown": bool(lifted and peak_action > THROW_ACTION), "max_speed": round(max_speed, 2), "rest_dist": round(float(pos[0] - base[0]), 3),
         "rest_err_along_cm": round(float(err[0]) * 100, 1), "rest_err_lateral_cm": round(float(err[1]) * 100, 1),
         "peak_action": round(peak_action, 3),
         "release_after_peak": None if release_step is None or peak_step is None else release_step - peak_step,
@@ -172,7 +180,7 @@ def summarize(rows: list[dict]) -> dict:
             "steps_mean": float(np.mean([r["steps"] for r in rs])),
         }
         summary["per_distance"][d] = s
-        tag = " (held out)" if d in throw_env.EVAL_BASKET_DISTANCES else ""
+        tag = "" if any(abs(d - t) < 1e-6 for t in throw_env.TRAIN_BASKET_DISTANCES) else " (held out)"
         along_txt = f"{s['rest_err_along_cm_mean']:+6.1f} +- {s['rest_err_along_cm_std']:4.1f}" if along.size else "      -      "
         lat_txt = f"{s['rest_err_lateral_cm_mean']:+6.1f}" if lat.size else "   -  "
         print(f"{d:5.2f}  {s['n']:3d}   {s['success']:5.0%}    {s['grasped']:5.0%}   {s['thrown']:5.0%}   "
@@ -210,11 +218,24 @@ def summarize(rows: list[dict]) -> dict:
     return summary
 
 
+def parse_distances(s: str) -> list[float]:
+    out = []
+    for item in (x.strip() for x in s.split(",")):
+        if ":" in item:
+            a, b, c = (float(v) for v in item.split(":"))
+            out.extend(round(float(v), 4) for v in np.arange(a, b + c / 2, c))
+        elif item:
+            out.append(float(item))
+    return out
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--policy", required=True, help="checkpoint folder (.../checkpoints/<step>/pretrained_model)")
-    p.add_argument("--distances", type=lambda s: [float(x) for x in s.split(",") if x.strip()],
-                   default=sorted(throw_env.TRAIN_BASKET_DISTANCES + throw_env.EVAL_BASKET_DISTANCES))
+    p.add_argument("--policy", help="checkpoint folder (.../checkpoints/<step>/pretrained_model)")
+    p.add_argument("--summarize", metavar="CSV", help="only re-score a saved episodes.csv (no simulation)")
+    p.add_argument("--distances", type=parse_distances,
+                   default=sorted(throw_env.TRAIN_BASKET_DISTANCES + throw_env.EVAL_BASKET_DISTANCES),
+                   help="comma list; an item 'start:stop:step' expands to a range including stop")
     p.add_argument("--episodes", type=int, default=10, help="episodes per distance")
     p.add_argument("--layout", choices=["spots", "random"], default=throw_env.LAYOUT_MODE)
     p.add_argument("--max-steps", type=int, default=500, help="25 s at 20 Hz (teleop demos: ~8-15 s)")
@@ -224,12 +245,41 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--bddl", default=str(throw_env.DEFAULT_BDDL))
+    p.add_argument("--output-max", type=float, default=throw_env.OUTPUT_MAX,
+                   help="controller m/step at action 1 (ours 0.4; LIBERO's default 0.05, which the "
+                        "pretrained smolvla_libero was trained with)")
+    p.add_argument("--task", default=None, help="instruction (default: the scene's, as used in training)")
     p.add_argument("--name", default=None, help="output folder name (default: from the checkpoint path + time)")
     return p.parse_args()
 
 
+def resummarize(path: str) -> None:
+    """Re-score a saved episodes.csv with the current definitions (e.g. the action-based throw flag)."""
+    rows = []
+    with open(path) as f:
+        for r in csv.DictReader(f):
+            r["basket"] = float(r["basket"])
+            for key in ("success", "grasped"):
+                r[key] = r[key] == "True"
+            for key in ("rest_dist", "rest_err_along_cm", "rest_err_lateral_cm", "peak_action", "max_speed"):
+                r[key] = float(r[key])
+            r["steps"] = int(r["steps"])
+            r["release_after_peak"] = int(r["release_after_peak"]) if r.get("release_after_peak") else None
+            r["thrown"] = r["grasped"] and r["peak_action"] > THROW_ACTION
+            rows.append(r)
+    summary = summarize(rows)
+    out = Path(path).with_name("summary_rescored.json")
+    out.write_text(json.dumps(summary, indent=2))
+    print(f"\nSaved {out}")
+
+
 def main() -> None:
     args = parse_args()
+    if args.summarize:
+        resummarize(args.summarize)
+        return
+    if not args.policy:
+        raise SystemExit("--policy is required (or --summarize CSV)")
     np.random.seed(args.seed)  # clutter jitter uses numpy's global RNG
     torch.manual_seed(args.seed)
     ckpt = Path(args.policy)  # .../<run>/checkpoints/<step>/pretrained_model -> <run>_<step>
@@ -241,8 +291,10 @@ def main() -> None:
     print(f"Loading {args.policy} on {args.device} ...")
     policy, pre, post = load_policy(args.policy, args.device, args.n_action_steps)
     env = throw_env.make_env(args.bddl)
+    if args.output_max != throw_env.OUTPUT_MAX:  # takes effect at the next reset
+        throw_env.configure_controller(env, output_max=args.output_max)
     env.seed(args.seed)
-    task = env.language_instruction
+    task = args.task or env.language_instruction
     print(f"Task {task!r}, distances {args.distances}, {args.episodes} episodes each, layout {args.layout}, "
           f"n_action_steps {policy.config.n_action_steps}")
 
@@ -267,7 +319,8 @@ def main() -> None:
         return
     summary = summarize(rows)
     summary.update({"policy": args.policy, "layout": args.layout, "episodes_per_distance": args.episodes,
-                    "n_action_steps": policy.config.n_action_steps, "seed": args.seed, "task": task})
+                    "n_action_steps": policy.config.n_action_steps, "seed": args.seed, "task": task,
+                    "output_max": args.output_max})
     with open(out / "episodes.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
