@@ -289,16 +289,22 @@ def sample_layout(n: int, rng=np.random) -> np.ndarray:
             return np.array(points)
 
 
-def arrange_pick_objects(env, mode: str = LAYOUT_MODE, rng=np.random) -> dict[str, tuple[float, float]]:
+def arrange_pick_objects(env, mode: str = LAYOUT_MODE, rng=np.random,
+                         targets: dict | None = None) -> dict[str, tuple[float, float]]:
     """Place the clutter objects: mode "spots" (own spot + small jitter) or "random" (see
-    above). Returns {name: (forward, lateral)} offsets of their footprint centres from the base."""
+    above), or exactly at `targets` {name: (forward, lateral)} (e.g. a layout logged by teleop,
+    to replay an episode; orientations as in "spots"). Returns {name: (forward, lateral)}
+    offsets of their footprint centres from the base."""
     inner = env.env
     m, d = inner.sim.model._model, inner.sim.data._data
     names = [n for n in PICK_OBJECTS if n in inner.objects_dict]
     if len(names) < 2:
         return {}
     base = robot_base(env)
-    if mode == "spots":
+    if targets is not None:
+        mode = "given"
+        layout = [np.array(targets.get(n, PICK_SPOTS[n]), dtype=float) for n in names]
+    elif mode == "spots":
         layout = [np.array(PICK_SPOTS[n]) + rng.uniform(-SPOT_JITTER, SPOT_JITTER, size=2) for n in names]
     elif mode == "random":
         layout = sample_layout(len(names), rng)
@@ -335,12 +341,13 @@ def footprint_center(env, name: str) -> np.ndarray:
 
 
 def apply_scene_fixes(env, pullback: float = AGENTVIEW_PULLBACK, basket_distance: float | None = None,
-                      basket_lateral: float = 0.0, layout: str | None = LAYOUT_MODE) -> dict[str, tuple[float, float]]:
-    """Cameras, clutter arrangement (layout mode, or None to leave LIBERO's), basket placement,
-    floor seating. Returns the clutter layout."""
+                      basket_lateral: float = 0.0, layout: str | None = LAYOUT_MODE,
+                      targets: dict | None = None) -> dict[str, tuple[float, float]]:
+    """Cameras, clutter arrangement (layout mode, or None to leave LIBERO's; `targets` places
+    the objects exactly), basket placement, floor seating. Returns the clutter layout."""
     pull_back_agentview(env, pullback)
     place_side_camera(env)
-    layout = arrange_pick_objects(env, layout) if layout else {}
+    layout = arrange_pick_objects(env, layout, targets=targets) if (layout or targets) else {}
     if basket_distance is not None:
         place_basket(env, basket_distance, basket_lateral)
     seat_on_floor(env)
@@ -350,12 +357,13 @@ def apply_scene_fixes(env, pullback: float = AGENTVIEW_PULLBACK, basket_distance
 
 
 def reset_scene(env, project: bool = True, basket_distance: float | None = None, basket_lateral: float = 0.0,
-                layout: str | None = LAYOUT_MODE):
-    """Reset, apply project fixes (clutter layout, optional basket placement), settle; returns
-    the first observation."""
+                layout: str | None = LAYOUT_MODE, targets: dict | None = None):
+    """Reset, apply project fixes (clutter layout or exact `targets`, optional basket placement),
+    settle; returns the first observation."""
     env.reset()
     if project:
-        apply_scene_fixes(env, basket_distance=basket_distance, basket_lateral=basket_lateral, layout=layout)
+        apply_scene_fixes(env, basket_distance=basket_distance, basket_lateral=basket_lateral, layout=layout,
+                          targets=targets)
     obs = None
     for _ in range(SETTLE_STEPS):
         obs, _, _, _ = env.step(NOOP)
