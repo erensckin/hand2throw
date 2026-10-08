@@ -6,6 +6,7 @@
 #
 # Environment overrides: STEPS, BATCH, WORKERS, SAVE_FREQ, OUT, EXTRA (extra lerobot-train args),
 # PER_DIST (data-scaling subset: first N clean demos per basket distance),
+# EPISODES (explicit JSON list of episode indices, overrides the selection; e.g. a matched baseline),
 # POLICY (starting checkpoint, default lerobot/smolvla_libero), ROOT (dataset folder, default
 # data/throw_ketchup; its episode log is <ROOT>_raw/episodes.jsonl), TAG (added to the run name).
 #   PER_DIST=25 bash scripts/train_throw.sh full                                   # data scaling
@@ -43,7 +44,7 @@ WORKERS=${WORKERS:-8}
 
 RENAME='{"observation.images.image": "observation.images.camera1", "observation.images.image2": "observation.images.camera2", "observation.images.image3": "observation.images.camera3"}'
 
-EPISODES=$(uv run python scripts/select_episodes.py "$LOG" ${PER_DIST:+--per-distance $PER_DIST})
+EPISODES=${EPISODES:-$(uv run python scripts/select_episodes.py "$LOG" ${PER_DIST:+--per-distance $PER_DIST})}
 echo "training on episodes: $EPISODES"
 echo "mode=$MODE policy=$POLICY root=$ROOT steps=$STEPS batch=$BATCH workers=$WORKERS save_freq=$SAVE_FREQ out=$OUT"
 uv run lerobot-train \
