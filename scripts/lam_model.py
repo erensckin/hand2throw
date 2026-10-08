@@ -1,5 +1,5 @@
-"""Small latent action model (LAPA-style latent action quantisation) that doubles as a
-world model.
+"""Small latent action model (LAPO-style: inverse + forward dynamics with a quantised latent)
+that doubles as a world model.
 
     encoder:  (frame_t, frame_t+k)  ->  N_TOKENS small vectors  ->  finite scalar quantisation
     decoder:  frame_t + quantised latent action  ->  predicted frame_t+k
@@ -16,8 +16,10 @@ codebook is an implicit grid that cannot collapse and needs no auxiliary losses.
 version with an EMA VQ codebook and zero-initialised FiLM layers collapsed: the decoder
 learned to predict frame t+k without the latent and the encoder settled on a constant.)
 
-Reference: LAPA, Latent Action Pretraining from Videos (Ye et al., ICLR 2025): VQ over frame
-pairs; their decoder is likewise used as a world model.
+References: LAPO, Learning to Act without Actions (Schmidt & Jiang, ICLR 2024): inverse and
+forward dynamics with a quantised latent, trained on video alone, then decoded to real actions
+with a small labelled set (here: a ridge map). LAPA, Latent Action Pretraining from Videos
+(Ye et al., ICLR 2025) scales the same idea to VLA pretraining, which this project does not do.
 """
 
 import math

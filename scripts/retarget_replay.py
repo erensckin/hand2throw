@@ -9,7 +9,7 @@ replayed in the simulator from the episode's logged layout and basket distance:
 
     teleop     the recorded teleop actions (upper bound: checks that the replay itself works)
     landmarks  actions predicted from the MediaPipe hand landmarks (a dedicated hand tracker)
-    latent     actions predicted from the unsupervised latent actions (raw hand pixels only)
+    latent     actions predicted from the unsupervised latent actions (tracker-masked hand video)
 
 As in teleop, orientation is held by a servo (the hand never controlled it), the reach guard
 stops pushes at full extension, and throws are the same scripted primitive started at the

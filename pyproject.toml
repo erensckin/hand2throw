@@ -1,7 +1,7 @@
 [project]
-name = "intern-challenge"
+name = "hand2throw"
 version = "0.1.0"
-description = "Add your description here"
+description = "Hand-tracking teleop demos, a SmolVLA that places or throws, and latent action models on human hand video (LIBERO)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
