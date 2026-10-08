@@ -23,12 +23,43 @@ and prints a per-distance table plus a strength-modulation check: the slope of r
 distance vs basket distance over thrown episodes (1 = lands where the basket is, 0 = throws
 the same at every distance).
 
+By default actions come from policy.select_action (LeRobot's own chunk queue), the loop used
+for every result up to 2026-10-08. Only --latency-steps L switches to our own chunk loop:
+each prediction returns the policy's full 50-step chunk; the first --n-action-steps H are
+executed, then it replans. This emulates asynchronous inference, deterministically: L = 0 is
+synchronous, like the default loop, and should reproduce its results exactly (same
+predictions, same random numbers; checked by rerunning a seed). With L > 0 the robot keeps moving
+while the model thinks: the next prediction starts when L actions of the current chunk are
+left, from the observation at that moment, and its result "arrives" L steps later; its first L
+actions were meant for steps already executed from the old chunk, so they are dropped and
+execution continues at index L. Every executed action is thus based on an observation L steps
+old. The first chunk of an episode is planned before the robot starts moving. With L > 0 the
+longest possible horizon is 50 - L. Inference time (preprocessing + chunk prediction) is
+timed on every prediction and reported, to choose a realistic L (1 step = 50 ms).
+
+Two opt-in phase rules for the chunk loop (each implies --latency-steps 0 if not given). The
+sweep is found as the first throw-sized action (|a[:3]| > THROW_ACTION): in the demos every
+sweep action is >= 0.75 and everything else <= 0.53, while the scripted wind-up (a P-servo,
+median largest action 0.16) overlaps ordinary teleop motion (up to 0.20), so the wind-up
+cannot be told apart by action size. The throw is therefore taken to start --throw-lead W
+steps before the sweep (demo wind-ups: median 10 steps, 95th percentile 17).
+  --throw-replan          when a chunk plans a throw starting ahead (sweep - W), cut the queue
+                          just before it so the throw is planned from a fresh observation, and
+                          execute that fresh chunk at least through the end of its sweep (+3
+                          steps): no replanning mid-throw. At most one cut per episode (a
+                          policy that keeps postponing the throw cannot loop); with latency L
+                          the cut is only made if the throw starts more than L steps ahead,
+                          so the fresh plan can arrive in time.
+  --horizon-from-throw K  once the throw starts (the queued sweep is W or fewer steps away),
+                          chunks are K long (the current one is shortened to K from there).
+
 Usage (from the repo root):
     uv run python scripts/eval_throw.py --summarize outputs/eval/<name>/episodes.csv   # re-score saved results
     uv run python scripts/eval_throw.py --policy outputs/train/<run>/checkpoints/last/pretrained_model
     uv run python scripts/eval_throw.py --policy ... --distances 0.8,0.9,1.0 --episodes 20
     uv run python scripts/eval_throw.py --policy ... --distances 0.70:1.00:0.025 --episodes 5   # continuous sweep
     uv run python scripts/eval_throw.py --policy ... --layout random       # layout generalisation
+    uv run python scripts/eval_throw.py --policy ... --latency-steps 2     # emulated async inference
     # the pretrained policy before our post-training, in its own action scale and wording:
     uv run python scripts/eval_throw.py --policy lerobot/smolvla_libero --output-max 0.05 \
         --task "pick up the ketchup and place it in the basket" --name pretrained_baseline
@@ -43,6 +74,7 @@ import argparse
 import csv
 import json
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -98,9 +130,65 @@ def make_batch(obs, task: str) -> dict:
     return batch
 
 
-def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video_path=None) -> dict:
+def predict_chunk(policy, pre, post, obs, task) -> tuple[np.ndarray, float]:
+    """One prediction from the current observation: the full chunk in real action units
+    (chunk_size x 7) and the inference time in ms (preprocessing + prediction)."""
+    t = time.perf_counter()
+    with torch.inference_mode():
+        chunk = policy.predict_action_chunk(pre(make_batch(obs, task)))  # (1, chunk_size, 7), normalised
+        if chunk.is_cuda:
+            torch.cuda.synchronize()
+        ms = (time.perf_counter() - t) * 1000
+        # same unnormalisation as the select_action path, one action at a time (not timed)
+        actions = np.stack([post(chunk[:, i]).to("cpu").numpy().reshape(-1) for i in range(chunk.shape[1])])
+    return actions, ms
+
+
+def throw_run(actions: np.ndarray) -> tuple[int, int] | None:
+    """First contiguous run of throw-sized actions (|a[:3]| > THROW_ACTION): (start, end), or None."""
+    big = np.linalg.norm(actions[:, :3], axis=1) > THROW_ACTION
+    if not big.any():
+        return None
+    start = end = int(np.argmax(big))
+    while end + 1 < len(big) and big[end + 1]:
+        end += 1
+    return start, end
+
+
+def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video_path=None,
+                latency: int | None = None, throw_replan: bool = False,
+                horizon_from_throw: int | None = None, throw_lead: int = 0) -> dict:
+    """latency None: the original select_action loop. An int: our own chunk loop, optionally
+    with the throw rules (see module doc)."""
     obs = throw_env.reset_scene(env, basket_distance=distance, layout=layout)
     policy.reset()
+    if latency is not None:
+        horizon = policy.config.n_action_steps
+        infer_ms = []
+        state = {"cut_done": False, "commit": False, "cut_step": None, "throw_started": False}
+
+        def load_chunk(actions: np.ndarray, at_step: int) -> deque:
+            """Queue a chunk's actions (index 0 = the current step); without the throw rules this is
+            exactly actions[:horizon]."""
+            h = horizon_from_throw if (horizon_from_throw and state["throw_started"]) else horizon
+            run = throw_run(actions) if (throw_replan or state["commit"]) else None
+            if state["commit"]:  # the fresh plan after a cut: keep it through its whole throw
+                state["commit"] = False
+                if run is not None:
+                    h = max(h, run[1] + 3)
+            elif throw_replan and not state["cut_done"] and run is not None and run[0] - throw_lead < h:
+                state["cut_done"] = True
+                start = run[0] - throw_lead  # where the throw (wind-up) is taken to begin
+                if start > latency:  # throw ahead: stop just before it, replan from a fresh view
+                    state["commit"], state["cut_step"] = True, at_step + start
+                    return deque(actions[:start])
+                h = max(h, run[1] + 3)  # throw starts (almost) now: this plan is fresh; keep it through
+            return deque(actions[:h])
+
+        chunk, ms = predict_chunk(policy, pre, post, obs, task)  # first plan before the robot moves
+        infer_ms.append(ms)
+        queue = load_chunk(chunk, 1)
+        pending = None  # (chunk, step at which it arrives)
     inner = env.env
     bid = inner.obj_body_id[throw_env.TARGET_OBJECT]
     jnt = inner.objects_dict[throw_env.TARGET_OBJECT].joints[-1]
@@ -114,9 +202,25 @@ def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video
     t0 = time.perf_counter()
     step = 0
     for step in range(1, max_steps + 1):
-        with torch.inference_mode():
-            action = policy.select_action(pre(make_batch(obs, task)))
-        action = post(action).to("cpu").numpy().reshape(-1)
+        if latency is None:  # the original loop: LeRobot's queue
+            with torch.inference_mode():
+                action = policy.select_action(pre(make_batch(obs, task)))
+            action = post(action).to("cpu").numpy().reshape(-1)
+        else:  # our chunk loop
+            if pending is None and len(queue) <= latency:  # start the next prediction from the current view
+                chunk, ms = predict_chunk(policy, pre, post, obs, task)
+                infer_ms.append(ms)
+                pending = (chunk, step + latency)
+            if pending is not None and step >= pending[1]:  # it arrives: skip the actions already in the past
+                queue = load_chunk(pending[0][latency:], step)
+                pending = None
+            if horizon_from_throw and not state["throw_started"]:
+                run = throw_run(np.array(queue))
+                if run is not None and run[0] <= throw_lead:  # the throw starts now
+                    state["throw_started"] = True
+                    while len(queue) > horizon_from_throw:  # this chunk: K steps from the throw's start
+                        queue.pop()
+            action = queue.popleft()
         if lifted:  # the policy's own throw: how hard it pushes and when it lets go
             push = float(np.linalg.norm(action[:3]))
             if push > peak_action:
@@ -151,7 +255,7 @@ def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video
 
     pos = inner.sim.data.body_xpos[bid].copy()
     err = pos[:2] - throw_env.footprint_center(env, "basket_1")
-    return {
+    row = {
         "basket": distance, "layout": layout, "success": bool(env.check_success()), "grasped": lifted,
         "thrown": bool(lifted and peak_action > THROW_ACTION), "max_speed": round(max_speed, 2), "rest_dist": round(float(pos[0] - base[0]), 3),
         "rest_err_along_cm": round(float(err[0]) * 100, 1), "rest_err_lateral_cm": round(float(err[1]) * 100, 1),
@@ -159,6 +263,12 @@ def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video
         "release_after_peak": None if release_step is None or peak_step is None else release_step - peak_step,
         "steps": step, "wall_s": round(time.perf_counter() - t0, 1),
     }
+    if latency is not None:
+        row.update({"n_plans": len(infer_ms), "infer_ms_median": round(float(np.median(infer_ms)), 1),
+                    "infer_ms_max": round(float(np.max(infer_ms)), 1)})
+        if throw_replan:
+            row["throw_cut_step"] = state["cut_step"]
+    return row
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -241,6 +351,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-steps", type=int, default=500, help="25 s at 20 Hz (teleop demos: ~8-15 s)")
     p.add_argument("--n-action-steps", type=int, default=None,
                    help="override how many actions of each predicted chunk are executed (checkpoint default: 50)")
+    p.add_argument("--latency-steps", type=int, default=None,
+                   help="use our own chunk loop with this emulated inference latency in control steps "
+                        "(50 ms each); 0 = synchronous. Omit for the original select_action loop")
+    p.add_argument("--throw-replan", action="store_true",
+                   help="chunk loop: replan just before a planned throw and commit through it (see doc)")
+    p.add_argument("--horizon-from-throw", type=int, default=None,
+                   help="chunk loop: chunk length from the start of the throw on")
+    p.add_argument("--throw-lead", type=int, default=0,
+                   help="the throw rules take the throw to start this many steps before the sweep "
+                        "(the wind-up; demos: median 10)")
     p.add_argument("--videos", type=int, default=2, help="videos saved per distance")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -290,20 +410,39 @@ def main() -> None:
 
     print(f"Loading {args.policy} on {args.device} ...")
     policy, pre, post = load_policy(args.policy, args.device, args.n_action_steps)
+    if args.throw_lead < 0:
+        raise SystemExit("--throw-lead must be >= 0")
+    if (args.throw_replan or args.horizon_from_throw) and args.latency_steps is None:
+        args.latency_steps = 0  # the throw rules live in our chunk loop; synchronous unless asked
+        print("Throw rules given: using the chunk loop, synchronous (--latency-steps 0)")
+    if args.horizon_from_throw is not None and not (
+            args.latency_steps or 0) < args.horizon_from_throw <= policy.config.chunk_size - (args.latency_steps or 0):
+        raise SystemExit("--horizon-from-throw must be > --latency-steps and <= chunk_size - latency")
+    if args.latency_steps is not None:
+        if args.latency_steps > 0:  # with latency, at most chunk_size - L actions of a chunk are still ahead
+            policy.config.n_action_steps = min(policy.config.n_action_steps,
+                                               policy.config.chunk_size - args.latency_steps)
+        if not 0 <= args.latency_steps < policy.config.n_action_steps:
+            raise SystemExit(f"--latency-steps must be >= 0 and < the executed horizon "
+                             f"({policy.config.n_action_steps})")
     env = throw_env.make_env(args.bddl)
     if args.output_max != throw_env.OUTPUT_MAX:  # takes effect at the next reset
         throw_env.configure_controller(env, output_max=args.output_max)
     env.seed(args.seed)
     task = args.task or env.language_instruction
     print(f"Task {task!r}, distances {args.distances}, {args.episodes} episodes each, layout {args.layout}, "
-          f"n_action_steps {policy.config.n_action_steps}")
+          f"n_action_steps {policy.config.n_action_steps}, latency_steps {args.latency_steps}, "
+          f"throw_replan {args.throw_replan}, horizon_from_throw {args.horizon_from_throw}, "
+          f"throw_lead {args.throw_lead}")
 
     rows = []
     try:
         for d in args.distances:
             for i in range(args.episodes):
                 video = out / "videos" / f"basket_{d:.2f}_ep{i:02d}.mp4" if i < args.videos else None
-                r = run_episode(env, policy, pre, post, task, d, args.layout, args.max_steps, video)
+                r = run_episode(env, policy, pre, post, task, d, args.layout, args.max_steps, video,
+                                latency=args.latency_steps, throw_replan=args.throw_replan,
+                                horizon_from_throw=args.horizon_from_throw, throw_lead=args.throw_lead)
                 r["episode"] = i
                 rows.append(r)
                 print(f"  basket {d:.2f} ep {i:2d}: success {r['success']!s:5}  grasped {r['grasped']!s:5}  "
@@ -321,6 +460,16 @@ def main() -> None:
     summary.update({"policy": args.policy, "layout": args.layout, "episodes_per_distance": args.episodes,
                     "n_action_steps": policy.config.n_action_steps, "seed": args.seed, "task": task,
                     "output_max": args.output_max})
+    if args.latency_steps is not None:
+        med = float(np.median([r["infer_ms_median"] for r in rows]))
+        worst = float(np.max([r["infer_ms_max"] for r in rows]))
+        steps = int(np.ceil(med / (1000 / throw_env.CONTROL_FREQ)))
+        print(f"Inference: {med:.0f} ms per chunk (median of episodes), {worst:.0f} ms worst (includes warm-up) "
+              f"-> realistic latency on this machine: {steps} step(s)")
+        summary.update({"chunk_loop": True, "latency_steps": args.latency_steps,
+                        "throw_replan": args.throw_replan, "horizon_from_throw": args.horizon_from_throw,
+                        "throw_lead": args.throw_lead,
+                        "inference_ms_median": med, "inference_ms_max": worst})
     with open(out / "episodes.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
