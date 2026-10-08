@@ -13,6 +13,11 @@
              trained latent (codes, and the continuous pre-quantisation vector), the same
              architecture untrained, and for the human videos the hand-tracker landmarks
              (the signal teleop actually turned into actions: a near upper bound).
+    silhouette  control for the masked videos: the same hand mask as a plain white shape on
+             black (no hand pixels), built from the landmarks into human_cam{1,2}_silhouette
+             caches aligned row by row with the masked caches (no video decoding). Training
+             and probing it shows how much of the masked videos' signal is just the mask's
+             position and size (which come from the hand tracker) vs the hand pixels inside it.
 
 Sources: robot_side, robot_wrist, robot_agent (policy cameras), human_cam1 (webcam:
 left/right, up/down, pinch), human_cam2 (phone: forward/back), and human_cam1_masked /
@@ -21,6 +26,8 @@ hull around the 21 tracked hand points; no hand = black frame). The phone saw th
 which showed the robot's cameras live, so unmasked phone video leaks the robot's motion
 (including the scripted throw, which the hand never performed); the masked versions are
 the clean hand-video measurement, and the unmasked/masked difference measures the leak.
+human_cam1_silhouette / human_cam2_silhouette: the mask alone (white hull on black), the
+control for what the masked videos carry beyond the tracker-placed cut-out.
 
 The probe target for a pair (t, t+k) is the sum of the k actions in between for the
 translation and rotation dims (the commanded motion) and their mean for the gripper.
@@ -31,6 +38,7 @@ Usage (from the repo root):
     uv run python scripts/lam.py train --source human_cam1
     uv run python scripts/lam.py train --source human_cam2
     uv run python scripts/lam.py probe --sources robot_side,human_cam1,human_cam2
+    uv run python scripts/lam.py silhouette        # after extract; then train + probe *_silhouette
 """
 
 import argparse
@@ -55,7 +63,7 @@ ROBOT_CAMS = {
     "robot_side": "observation.images.image3",
 }
 HUMAN_CAMS = {"human_cam1": "cam1", "human_cam2": "cam2"}
-HUMAN_SOURCES = [*HUMAN_CAMS, *(f"{n}_masked" for n in HUMAN_CAMS)]
+HUMAN_SOURCES = [*HUMAN_CAMS, *(f"{n}_masked" for n in HUMAN_CAMS), *(f"{n}_silhouette" for n in HUMAN_CAMS)]
 ACTION_NAMES = ["x", "y", "z", "rx", "ry", "rz", "gripper"]
 PHASES = {0: "hand-driven", 1: "scripted throw"}
 PALM_IDS = [0, 5, 9, 13, 17]  # as in teleop.py
@@ -86,17 +94,21 @@ def center_square(frame: np.ndarray, size: int) -> np.ndarray:
     return cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), (size, size), interpolation=cv2.INTER_AREA)
 
 
-def hand_only(frame: np.ndarray, pts: np.ndarray) -> np.ndarray:
-    """Black out everything except the hand: filled hull of the landmarks, dilated by ~0.35
-    hand sizes (wrist -> middle-finger base). No hand detected -> black frame."""
+def hand_mask(shape: tuple[int, int], pts: np.ndarray | None) -> np.ndarray:
+    """uint8 mask (255 = hand): filled hull of the landmarks, dilated by ~0.35 hand sizes
+    (wrist -> middle-finger base). No hand detected -> all zeros."""
+    mask = np.zeros(shape, np.uint8)
     if pts is None or np.isnan(pts).any():
-        return np.zeros_like(frame)
+        return mask
     size = max(float(np.linalg.norm(pts[0, :2] - pts[9, :2])), 1.0)
-    mask = np.zeros(frame.shape[:2], np.uint8)
     cv2.fillConvexPoly(mask, cv2.convexHull(np.round(pts[:, :2]).astype(np.int32)), 255)
     r = max(3, int(0.35 * size))
-    mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
-    return cv2.bitwise_and(frame, frame, mask=mask)
+    return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
+
+
+def hand_only(frame: np.ndarray, pts: np.ndarray) -> np.ndarray:
+    """Black out everything except the hand (see hand_mask). No hand detected -> black frame."""
+    return cv2.bitwise_and(frame, frame, mask=hand_mask(frame.shape[:2], pts))
 
 
 def hand_features(landmarks: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -190,6 +202,30 @@ def cmd_extract(args) -> None:
             print(f"Saved {CACHE / out_name}.npz ({len(rows)} frames, {len(keep_rows)} episodes; skipped "
                   f"{len(skipped)}" + (f", e.g. {skipped[:3]}" if skipped else "") + ")")
     print(f"Done in {time.time() - t0:.0f} s")
+
+
+def cmd_silhouette(args) -> None:
+    """Mask-only control caches, row-aligned with the masked caches. The masked caches hold,
+    per episode, the first n operator frames in order, so row i of an episode is video frame
+    i and landmark i (as in cmd_extract); only the video size is read, nothing is decoded."""
+    t0 = time.time()
+    for name, cam in HUMAN_CAMS.items():
+        base = load_cache(f"{name}_masked")
+        size = base["frames"].shape[1]
+        out = np.zeros_like(base["frames"])
+        for ep in np.unique(base["episode"]):
+            rows = np.where(base["episode"] == ep)[0]
+            cap = cv2.VideoCapture(str(Path(args.raw) / f"episode_{ep:04d}_{cam}.mp4"))
+            width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+            with np.load(Path(args.raw) / f"episode_{ep:04d}_landmarks.npz") as lm:
+                landmarks = lm[f"landmarks_px_{cam}"]
+            for i, r in enumerate(rows):
+                m = hand_mask((height, width), landmarks[i] if i < len(landmarks) else None)
+                out[r] = center_square(np.repeat(m[:, :, None], 3, axis=2), size)
+        np.savez(CACHE / f"{name}_silhouette.npz", frames=out, **{k: v for k, v in base.items() if k != "frames"})
+        print(f"Saved {CACHE / name}_silhouette.npz ({len(out)} frames, mask covers "
+              f"{(out[..., 0] > 127).mean() * 100:.1f} % of pixels on average)  ({time.time() - t0:.0f} s)")
 
 
 # ----------------------------------------------------------------------------- shared
@@ -383,7 +419,7 @@ def cmd_probe(args) -> None:
         del frames
         torch.cuda.empty_cache()
 
-    for suffix in ("", "_masked"):  # webcam + phone together: all three axes are observed
+    for suffix in ("", "_masked", "_silhouette"):  # webcam + phone together: all three axes are observed
         if f"human_cam1{suffix}" not in human or f"human_cam2{suffix}" not in human:
             continue
         a, b = human[f"human_cam1{suffix}"], human[f"human_cam2{suffix}"]
@@ -394,7 +430,7 @@ def cmd_probe(args) -> None:
         if a["lm"] is not None and b["lm"] is not None:
             feats["webcam + phone landmarks"] = np.hstack([a["lm"][ra], b["lm"][rb]])
         label = f"human_cam1+cam2{suffix}"
-        results[label] = probe_table(f"human webcam + phone combined{' (hand only)' if suffix else ''}", feats,
+        results[label] = probe_table(f"human webcam + phone combined{ {'': '', '_masked': ' (hand only)', '_silhouette': ' (mask only)'}[suffix] }", feats,
                                      a["y"][ra], a["test"][ra], a["phase"][ra])
 
     RUNS.mkdir(parents=True, exist_ok=True)
@@ -427,11 +463,13 @@ def main() -> None:
     t.add_argument("--motion-weight", type=float, default=10.0, help="extra loss weight on pixels that change")
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--device", default="cuda")
+    m = sub.add_parser("silhouette")
+    m.add_argument("--raw", default="data/throw_ketchup_raw")
     q = sub.add_parser("probe")
     q.add_argument("--sources", default="robot_side,human_cam1,human_cam2")
     q.add_argument("--device", default="cuda")
     args = p.parse_args()
-    {"extract": cmd_extract, "train": cmd_train, "probe": cmd_probe}[args.cmd](args)
+    {"extract": cmd_extract, "train": cmd_train, "probe": cmd_probe, "silhouette": cmd_silhouette}[args.cmd](args)
 
 
 if __name__ == "__main__":
