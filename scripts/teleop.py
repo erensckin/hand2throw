@@ -1,66 +1,31 @@
-"""Hand-tracking teleoperation for the LIBERO throwing scene, with dataset recording.
+"""Hand-tracking teleoperation of the throwing scene, with dataset recording.
 
-Camera(s) -> MediaPipe hand landmarks -> 7-D LIBERO action -> sim step. Each saved
-episode goes into a LeRobotDataset in the lerobot/libero format (agentview, wrist and side
-images, 8-D state, 7-D action, task string). The raw operator video and hand landmarks of
-every camera are saved next to it as the personally collected real-world data.
+A webcam and optionally a phone camera are tracked with MediaPipe, and hand motion becomes
+end-effector actions for the simulated Panda. Saved episodes go into a LeRobotDataset
+(agentview, wrist and side cameras, 8-D state, 7-D action, task text). The raw operator
+video and hand landmarks are saved next to it in <root>_raw/, and every episode gets one
+line in <root>_raw/episodes.jsonl (basket distance, place or throw, throw parameters,
+object positions).
 
-Mappings (relative control, so no calibration between the cameras is needed):
-  ego (default with --camera2): as if you stood behind the robot, facing the basket.
-      --camera   front webcam, facing you, image mirrored:
-                     hand left / right  -> robot's left / right (y)
-                     hand up / down     -> up / down (z)
-                     pinch thumb+index  -> close gripper; release the pinch -> open
-      --camera2  phone on your LEFT, looking across your hand (--cam2-axis horizontal),
-                 or overhead looking down (--cam2-axis vertical):
-                     hand towards / away from the screen -> forward / back (x, towards the basket)
-  planar (default without --camera2): one webcam. Hand left/right -> forward/back (x),
-      up/down -> z, robot y fixed (or --lateral-from-size: noisy, wrist tilt reads as
-      sideways motion).
+Control is relative, with SPACE as a clutch: it anchors your hand to the gripper's current
+position, and pressing it again pauses. With a phone (--camera2) the webcam gives left/right
+and up/down and the phone, on your left, gives forward/back. With one webcam, left/right maps
+to forward/back instead. Pinching thumb and index closes the gripper. Hand position is
+measured in units of the hand's apparent size, so moving towards one camera does not move
+the robot along the axes that camera measures. Orientation is held fixed.
 
-Throwing: grab the ketchup, then press T. The scripted throw (throw_env.ThrowPrimitive)
-runs from wherever the hand is: rise, pull back to the wind-up pose, sweep, release. Its
-strength comes from the calibration fit and the TRUE basket distance, i.e. privileged
-simulator information that only the demonstrator has; the policy never sees it and has to
-infer the strength from the cameras. You decide whether to throw (or place) and when.
-Your hand input is ignored while it runs; every step is recorded. Baskets within reach
-(0.70 m) are placed by hand: pinch, carry, release over the basket. After each throw the
-terminal prints where the ketchup came to rest relative to the basket centre.
+The throw is shared autonomy: grasp the ketchup and press t, and a scripted throw
+(throw_env.ThrowPrimitive) takes over. Its strength comes from the true basket distance,
+which only the demonstrator knows; the policy has to infer it from its cameras. At 0.70 m
+the ketchup is placed by hand instead. Each new episode uses the basket distance with the
+fewest saved episodes, and successful episodes save automatically. The window shows the
+policy's three cameras next to the webcam and phone.
 
-Control is relative with a clutch: SPACE anchors your current hand pose to the robot's
-current gripper position and the robot follows from there; SPACE again pauses (the robot
-holds). The first SPACE of an episode starts recording. Targets are clamped to the arm's
-comfortable reach, so pulling the hand back always moves the arm back at once.
-
-Hand position is measured as the palm's offset from the image centre in units of the
-hand's own apparent size. For a pinhole camera that is the hand's real offset divided by
-its real size, whatever its distance, so moving towards one camera doesn't leak into the
-axes that camera measures, and --gain is robot metres per metre of hand motion for both
-cameras. Each camera's features update only when it delivers a new frame. The gripper is
-held pointing down at its reset orientation (rotation servo) while you teleoperate.
-
-Window (landscape, 3 x 2 tiles):
-    agentview      | side camera   | webcam
-    wrist camera   | status text   | phone
-You see exactly the three cameras the policy gets, as recorded (LIBERO's 180-degree image
-convention, so they can look mirrored), so a demo never relies on a view the policy lacks.
-The status tile shows the basket distance and whether to place or throw.
-
-Keys (click the teleop window first):
-    SPACE  follow / pause            t    throw (strength set from the basket distance)
+Keys (click the window first):
+    SPACE  follow / pause            t      throw
     s      save episode              d / r  discard episode and reset
     f / v / l  flip forward / vertical / lateral direction
-    m      toggle fullscreen         q    quit (discards an unsaved episode)
-
-Gripper timing: commands are the plain +-1 LIBERO uses, so the fingers start opening
-~0.15 s after you release the pinch (the real Franka hand takes ~0.25 s).
-
-Basket distance: every episode places the basket at one of --distances (default: the
-training set in throw_env). When recording, each new episode gets the distance with the
-fewest saved episodes so far, so the dataset stays balanced. Successful episodes save
-automatically; each is logged as one JSON line in <root>_raw/episodes.jsonl (basket
-distance, place or throw, throw key/strength, clutter layout). Delete the dataset folder
-and its _raw folder together, or the log and the dataset disagree.
+    m      toggle fullscreen         q      quit (discards an unsaved episode)
 
 Usage (from the repo root):
     uv run python scripts/teleop.py --no-record --camera2 http://PHONE_IP:4747/video    # practise

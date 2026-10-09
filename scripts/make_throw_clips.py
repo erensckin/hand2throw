@@ -1,18 +1,10 @@
-"""Up-weight the throw by oversampling: a copy of a dataset with extra throw-only episodes.
+"""Up-weight the throw: copy a dataset and add throw-only episodes.
 
-The throw is ~25 % of a throw demo's frames but decides success. Training samples frames
-uniformly, so adding, for every kept throw episode, COPIES extra episodes that contain only
-its throw segment makes throw frames ~(1 + COPIES) times as likely in a batch. The clips are
-real recorded frames with their real actions; nothing is synthesised. (LeRobot's built-in
-sample weighting only offers RA-BC, which needs a separately trained progress model.)
-
-Throw segment: from the 't' press (human demos: episodes.jsonl throw.start_step) or from
-WINDUP steps before the first strong push (self-improvement episodes: throw.start_step is
-the first push) minus MARGIN frames, to the end of the episode.
-
-The source dataset is copied first and never modified. Clips are logged in the copy's
-episodes.jsonl with "source": "clip" and "clip_of": <episode>, so scripts/select_episodes.py
-includes them and they stay traceable.
+The throw is about a quarter of a throw demo's frames but decides success. For every kept
+throw episode, COPIES extra episodes containing only its throw segment are added, so throw
+frames are sampled about (1 + COPIES) times as often. The clips are real recorded frames and
+actions. The source dataset is copied first and never modified; clips are logged with
+"source": "clip" and "clip_of": <episode>.
 
 Usage (from the repo root):
     uv run python scripts/make_throw_clips.py --src data/throw_ketchup_si --out data/throw_ketchup_si_uw

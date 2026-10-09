@@ -1,33 +1,20 @@
-"""Shared setup for the throwing task: one place for every env setting that teleop
-recording, evaluation and the debug tools must agree on.
+"""Shared settings for the throwing scene, used by teleop, training data and evaluation.
 
-Import from a script in this folder with `import throw_env` (scripts/ is on sys.path
-when you run `uv run python scripts/<name>.py`).
+Changes from stock LIBERO, all applied at runtime (no LIBERO code is modified):
+  * controller: translational output_max raised from 0.05 to OUTPUT_MAX m per step, so
+    the arm can throw. Otherwise LIBERO's default OSC_POSE.
+  * clutter: the ketchup and four distractors each sit on their own spot, jittered by
+    +-1 cm at every reset, as in LIBERO's own tasks. layout="random" is for a separate
+    layout-generalisation test.
+  * spawn: objects are re-seated just above the floor after every reset, because the
+    floor scene spawns them partly inside it.
+  * side camera: the floor scene's unused `galleryview` camera is moved to a side view of
+    the basket and recorded as image3 (SmolVLA's camera3). Reusing an existing camera
+    avoids a new scene class, which LIBERO would need registered in several global tables.
+  * basket: placed at a given distance in front of the robot after every reset.
 
-What it fixes relative to stock LIBERO (see PROJECT_NOTES.md for the reasoning):
-  * controller: translational output_max raised from 0.05 to OUTPUT_MAX m/step so the
-    arm can throw (~1.7-2 m/s); everything else is LIBERO's default OSC_POSE.
-  * agentview camera: LIBERO's stock floor-scene pose (no pull-back by default), i.e. the
-    exact camera1 view smolvla_libero saw for libero_object. It covers the pick area and
-    the clutter; the side camera covers the basket and the throw.
-  * clutter: the ketchup and four distractors each have their own spot in front of the
-    robot, jittered by +-1 cm after every reset, with LIBERO's fixed orientations: LIBERO's
-    own protocol (each object in its own small region). Fully random layouts are kept as
-    layout="random" for a separate layout-generalisation evaluation.
-  * spawn: LIBERO's floor scene spawns objects partly inside the floor; objects are
-    re-seated SPAWN_CLEARANCE above it after every reset.
-  * side camera: LIBERO's floor scene defines a camera nobody uses, `galleryview`. After
-    every reset it is moved to a side pose (robot on the left, basket on the right) so
-    the gripper-basket distance is a horizontal image offset. It is recorded as image3,
-    which maps to SmolVLA's camera3 ("side") slot.
-    This deliberately avoids defining a new LIBERO scene class: LIBERO keys several
-    global registries by the BDDL problem name (TASK_MAPPING, REGION_SAMPLERS, ...), so a
-    new problem name would have to be patched into all of them. Editing an existing
-    camera's pose at runtime, like the agentview pull-back, needs none of that.
-  * basket distance: optionally re-placed after reset at a given distance in front of
-    the robot (TRAIN/EVAL_BASKET_DISTANCES).
-
-It also holds the throw primitive used by shared-autonomy teleop (ThrowPrimitive).
+It also holds the scripted throw used in teleop (ThrowPrimitive) and its calibration.
+Scripts in this folder import it with `import throw_env`.
 """
 
 import os

@@ -1,44 +1,30 @@
-"""Latent action model (LAM) on the recorded demos: extract, train, probe.
+"""Latent action models on the recorded demos: extract, train, probe.
 
-    extract  decode the dataset's three robot cameras and the raw operator videos (webcam =
-             cam1, phone = cam2) into 96x96 caches in data/lam_cache/, aligned frame by frame
-             with the robot actions (teleop recorded one operator frame per robot step). The
-             human caches also hold the MediaPipe hand landmarks teleop used (palm position in
-             hand-size units, pinch ratio, hand present).
-    train    train a latent action model (scripts/lam_model.py) on one source's frame pairs
-             (t, t+k); 20 % of episodes (index % 5 == 0) are held out for the probes
-    probe    linear (ridge) probes from the latent actions to the ROBOT's real actions on the
-             held-out episodes: R^2 per action dimension. Probes are fitted separately for all
-             pairs, the hand-driven teleop phases and the scripted throw. Feature sets: the
-             trained latent (codes, and the continuous pre-quantisation vector), the same
-             architecture untrained, and for the human videos the hand-tracker landmarks
-             (the signal teleop actually turned into actions: a near upper bound).
-    silhouette  control for the masked videos: the same hand mask as a plain white shape on
-             black (no hand pixels), built from the landmarks into human_cam{1,2}_silhouette
-             caches aligned row by row with the masked caches (no video decoding). Training
-             and probing it shows how much of the masked videos' signal is just the mask's
-             position and size (which come from the hand tracker) vs the hand pixels inside it.
+    extract     decode the dataset's robot cameras and the operator videos (webcam = cam1,
+                phone = cam2) into 96x96 caches in data/lam_cache/, aligned frame by frame
+                with the robot actions. Human caches also hold the hand-tracker features.
+    train       train a model (lam_model.py) on one source's frame pairs (t, t+k). Episodes
+                with index % 5 == 0 are held out.
+    probe       ridge regression from the latent actions to the robot's real actions on the
+                held-out episodes: R^2 per action dimension, overall and separately for the
+                hand-driven phase and the scripted throw. Baselines: the same model
+                untrained, and for human video the hand-tracker landmarks.
+    silhouette  control for the masked videos: the same hand mask as a plain white shape
+                on black, without hand pixels.
 
-Sources: robot_side, robot_wrist, robot_agent (policy cameras), human_cam1 (webcam:
-left/right, up/down, pinch), human_cam2 (phone: forward/back), and human_cam1_masked /
-human_cam2_masked: the same videos with everything outside the hand blacked out (a dilated
-hull around the 21 tracked hand points; no hand = black frame). The phone saw the monitor,
-which showed the robot's cameras live, so unmasked phone video leaks the robot's motion
-(including the scripted throw, which the hand never performed); the masked versions are
-the clean hand-video measurement, and the unmasked/masked difference measures the leak.
-human_cam1_silhouette / human_cam2_silhouette: the mask alone (white hull on black), the
-control for what the masked videos carry beyond the tracker-placed cut-out.
+Sources: robot_side, robot_wrist and robot_agent (the policy's cameras); human_cam1 and
+human_cam2 (raw operator video); *_masked (everything outside the tracked hand blacked
+out); *_silhouette. The phone also saw the monitor showing the robot's cameras, so unmasked
+phone video leaks the robot's motion, including the throw.
 
-The probe target for a pair (t, t+k) is the sum of the k actions in between for the
-translation and rotation dims (the commanded motion) and their mean for the gripper.
+The probe target for a pair (t, t+k) is the sum of the k actions in between (for the
+gripper, their mean).
 
 Usage (from the repo root):
     uv run python scripts/lam.py extract
     uv run python scripts/lam.py train --source robot_side
-    uv run python scripts/lam.py train --source human_cam1
-    uv run python scripts/lam.py train --source human_cam2
     uv run python scripts/lam.py probe --sources robot_side,human_cam1,human_cam2
-    uv run python scripts/lam.py silhouette        # after extract; then train + probe *_silhouette
+    uv run python scripts/lam.py silhouette        # then train and probe the *_silhouette sources
 """
 
 import argparse

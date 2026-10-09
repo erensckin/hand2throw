@@ -1,33 +1,22 @@
-"""Robot demos generated from the operator's hand video alone, for training the VLA.
+"""Video-inferred demos: robot demonstrations whose hand actions come from the operator's video.
 
-The question: can demonstrations that come from human hand video (no teleop actions) train
-the policy, and how do they compare with the same number of real teleop demos?
+1. The masked-video latent action models turn every frame pair into a latent action.
+2. A ridge map from latents to robot actions is fitted on the hand-driven phases of the
+   held-out episodes (index % 5 == 0). These are the only teleop actions used.
+3. Every other clean demo is re-simulated from its logged scene, driven by actions
+   predicted from its own video (orientation servo and reach guard as in teleop). Throw
+   episodes switch to the same scripted throw at the logged t press. Each episode is
+   recorded in the training format and kept only if it succeeds.
+4. The source indices of the kept episodes go to <out>_raw/source_episodes.json, so the
+   original teleop recordings of the same scenes can train a matched baseline.
 
-1. Latent actions: the latent action models trained on the hand-only (masked) webcam and
-   phone videos (scripts/lam.py) turn every frame pair (t, t+k) into a latent action.
-2. Grounding with few labels: a ridge map latent -> robot action is fitted on the hand-driven
-   phases of the FIT episodes only (default: the ~41 episodes the latent models never saw,
-   index % 5 == 0). These are the only episodes whose teleop actions are used.
-3. Generation: every other clean demo (~159) is re-simulated from its logged layout and basket
-   distance, driven only by actions predicted from its hand video, exactly as in
-   scripts/retarget_replay.py (orientation servo, reach guard, and for throw episodes the same
-   scripted throw primitive started at the logged 't' press). Every frame is recorded in the
-   training format (3 cameras, 8-D state, 7-D action, task). Episodes end like teleop's: the
-   ketchup in the basket for SUCCESS_HOLD_STEPS. Successful episodes with the expected strategy
-   are kept, the rest dropped.
-4. Matched baseline: the kept episodes' SOURCE indices are written to
-   <out>_raw/source_episodes.json, so the original teleop recordings of exactly the same scenes
-   (same count, layouts, distances) train the comparison policy. Only the origin of the
-   hand-driven actions differs.
-
-Caveats (for the write-up): the masks come from the hand tracker's landmarks; the latent
-models saw the generated episodes' videos during their (unsupervised) training; the throw is
-the scripted primitive with privileged strength, as in teleop; layouts are the logged ones.
+Caveats: the masks come from the hand tracker, the latent models saw these videos during
+their unsupervised training, and the throw uses privileged strength, as in teleop.
 
 Usage (from the repo root):
     uv run python scripts/hand_demos.py --limit 2 --out data/throw_ketchup_hand_smoke   # smoke test
-    uv run python scripts/hand_demos.py                                                # all (~20 min)
-Then train both (see the printed commands).
+    uv run python scripts/hand_demos.py
+Then train both datasets with the commands it prints.
 """
 
 import os

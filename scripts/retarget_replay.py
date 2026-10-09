@@ -1,23 +1,20 @@
-"""Drive the robot from the operator's hand video alone: latent-action retargeting, replayed in LIBERO.
+"""Drive the robot from the operator's hand video alone, replayed in LIBERO.
 
-The latent action models trained on the hand-only (masked) webcam and phone videos
-(scripts/lam.py) turn every pair of video frames (t, t+k) into a latent action. A ridge map
-from those latents to the robot's actions is fitted on the TRAINING episodes' hand-driven
-phases (the teleop recordings pair every video frame with a robot action). On the HELD-OUT
-episodes (index % 5 == 0) the hand video alone then produces robot actions, which are
-replayed in the simulator from the episode's logged layout and basket distance:
+The masked-video latent action models turn every frame pair into a latent action. A ridge
+map from latents to robot actions is fitted on the training episodes' hand-driven phases.
+On the held-out episodes (index % 5 == 0) the predicted actions are replayed open loop from
+each episode's logged scene, for three action sources:
 
-    teleop     the recorded teleop actions (upper bound: checks that the replay itself works)
-    landmarks  actions predicted from the MediaPipe hand landmarks (a dedicated hand tracker)
-    latent     actions predicted from the unsupervised latent actions (tracker-masked hand video)
+    teleop     the recorded teleop actions (checks that the replay itself works)
+    landmarks  actions predicted from the MediaPipe hand landmarks
+    latent     actions predicted from the latent actions of the masked hand video
 
-As in teleop, orientation is held by a servo (the hand never controlled it), the reach guard
-stops pushes at full extension, and throws are the same scripted primitive started at the
-logged moment ('t' press); the throw itself is never retargeted (the hand did nothing then).
-Per variant: grasp rate, task success, and the gripper's path error against the teleop
-replay (mean over the hand-driven phase, and where the throw starts / the episode ends).
+As in teleop, orientation is held by a servo and a reach guard stops pushes at full
+extension. Throws are the same scripted primitive, started at the logged t press; the throw
+itself is never retargeted. Reports grasp rate, success and the gripper's path error against
+the teleop replay.
 
-Usage (from the repo root, after `scripts/lam.py train` on both masked human sources):
+Usage (from the repo root, after training the two masked human models with lam.py):
     uv run python scripts/retarget_replay.py
     uv run python scripts/retarget_replay.py --episodes 10 --videos 3
 Results: outputs/retarget/<time>/results.csv, summary.json, videos/ (hand videos | robot, side camera).

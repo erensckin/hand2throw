@@ -1,57 +1,23 @@
-"""Evaluate a fine-tuned policy on the throwing scene.
+"""Evaluate a SmolVLA checkpoint on the throwing scene.
 
-lerobot-eval only runs LIBERO's built-in suites, so this is our own loop. Observations are
-built exactly like the recorded dataset (throw_env.policy_images: agentview / wrist / side in
-LIBERO's image convention, throw_env.state8, the BDDL instruction) and go through the
-checkpoint's own pre/post-processors (camera rename map, normalisation stats, tokenizer),
-the same pipeline lerobot-eval uses: preprocessor -> select_action -> postprocessor.
+lerobot-eval only runs LIBERO's built-in suites, so this is a small custom loop. Observations
+are built like the recorded dataset and pass through the checkpoint's own pre- and
+post-processors. For each basket distance it runs N episodes and records whether the ketchup
+ended in the basket, whether it was grasped and thrown, where it came to rest, and the
+policy's peak action while holding it. The peak action is the policy's own throw strength;
+the demos' scripted sweep peaks at 0.91 / 1.07 / 1.22 at 0.80 / 0.90 / 1.00 m. An episode
+counts as thrown when that peak is above 0.5 (object speed is not used, because a ketchup
+dropped into the basket also moves fast).
 
-Per basket distance it runs N episodes and records:
-    success      ketchup in the basket (LIBERO's predicate, held 0.5 s)
-    grasped      ketchup lifted > 5 cm at some point
-    thrown       the policy pushed hard while holding the ketchup (peak commanded translation
-                 > 0.5; the demos' throw sweeps are 0.91-1.22, placing ~0.13). Object speed is
-                 not used: a ketchup dropped into the basket from hand height also exceeds 1 m/s
-    rest error   where it came to rest relative to the basket centre (along / lateral, cm)
-    rest dist    how far from the robot base it came to rest (m)
-    peak action  largest commanded translation |a[:3]| while holding the ketchup: the policy's
-                 own throw strength (the demos' scripted sweep is strength * sqrt(2), i.e.
-                 0.91 / 1.07 / 1.22 at 0.80 / 0.90 / 1.00 m)
-    release      steps between that peak and the first open command after it (demos: the
-                 open command comes 2 sweep steps in, at full push)
-and prints a per-distance table plus a strength-modulation check: the slope of rest
-distance vs basket distance over thrown episodes (1 = lands where the basket is, 0 = throws
-the same at every distance).
-
-By default actions come from policy.select_action (LeRobot's own chunk queue), the loop used
-for every result up to 2026-10-08. Only --latency-steps L switches to our own chunk loop:
-each prediction returns the policy's full 50-step chunk; the first --n-action-steps H are
-executed, then it replans. This emulates asynchronous inference, deterministically: L = 0 is
-synchronous, like the default loop, and should reproduce its results exactly (same
-predictions, same random numbers; checked by rerunning a seed). With L > 0 the robot keeps moving
-while the model thinks: the next prediction starts when L actions of the current chunk are
-left, from the observation at that moment, and its result "arrives" L steps later; its first L
-actions were meant for steps already executed from the old chunk, so they are dropped and
-execution continues at index L. Every executed action is thus based on an observation L steps
-old. The first chunk of an episode is planned before the robot starts moving. With L > 0 the
-longest possible horizon is 50 - L. Inference time (preprocessing + chunk prediction) is
-timed on every prediction and reported, to choose a realistic L (1 step = 50 ms).
-
-Two opt-in phase rules for the chunk loop (each implies --latency-steps 0 if not given). The
-sweep is found as the first throw-sized action (|a[:3]| > THROW_ACTION): in the demos every
-sweep action is >= 0.75 and everything else <= 0.53, while the scripted wind-up (a P-servo,
-median largest action 0.16) overlaps ordinary teleop motion (up to 0.20), so the wind-up
-cannot be told apart by action size. The throw is therefore taken to start --throw-lead W
-steps before the sweep (demo wind-ups: median 10 steps, 95th percentile 17).
-  --throw-replan          when a chunk plans a throw starting ahead (sweep - W), cut the queue
-                          just before it so the throw is planned from a fresh observation, and
-                          execute that fresh chunk at least through the end of its sweep (+3
-                          steps): no replanning mid-throw. At most one cut per episode (a
-                          policy that keeps postponing the throw cannot loop); with latency L
-                          the cut is only made if the throw starts more than L steps ahead,
-                          so the fresh plan can arrive in time.
-  --horizon-from-throw K  once the throw starts (the queued sweep is W or fewer steps away),
-                          chunks are K long (the current one is shortened to K from there).
+By default actions come from LeRobot's own chunk queue (policy.select_action), as in all
+main results. Options for the chunk-horizon and latency experiments:
+    --n-action-steps H      execute H actions of each 50-step chunk, then replan
+    --latency-steps L       emulate asynchronous inference: every executed action is based
+                            on an observation L steps old (1 step = 50 ms). L = 0 reproduces
+                            the default loop exactly
+    --throw-replan          replan right before the throw, so it starts from a fresh observation
+    --horizon-from-throw K  use K-step chunks once the throw has started
+    --throw-lead W          how many steps before the sweep the throw counts as started
 
 Usage (from the repo root):
     uv run python scripts/eval_throw.py --summarize outputs/eval/<name>/episodes.csv   # re-score saved results

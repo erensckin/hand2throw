@@ -1,25 +1,17 @@
-"""Small latent action model (LAPO-style: inverse + forward dynamics with a quantised latent)
-that doubles as a world model.
+"""Small latent action model that doubles as a world model (LAPO-style).
 
-    encoder:  (frame_t, frame_t+k)  ->  N_TOKENS small vectors  ->  finite scalar quantisation
-    decoder:  frame_t + quantised latent action  ->  predicted frame_t+k
+    encoder:  (frame t, frame t+k) -> 4 tokens of 3 numbers -> FSQ, 5 levels each
+    decoder:  frame t + quantised latent -> predicted frame t+k
 
-The latent is tiny (4 tokens of 3 dims, each rounded to 5 levels: 125 codes per token, ~28
-bits per frame pair), so it cannot carry the image itself: the decoder gets all static
-content from frame_t through skip connections and the latent only has room for "what
-changed", i.e. the action. Because the decoder predicts the next frame from the current
-frame and a latent action, it is also a (latent-action-conditioned) world model.
+The latent is tiny (125 codes per token, about 28 bits per frame pair), so it cannot carry
+the image. The decoder gets the scene from frame t through skip connections, and the latent
+only has room for what changed. Quantisation is FSQ (Mentzer et al. 2023), which has no
+codebook that could collapse. An earlier version with an EMA VQ codebook and zero-initialised
+FiLM layers did collapse: the decoder ignored the latent and the encoder became constant.
 
-Quantisation is FSQ (finite scalar quantisation, Mentzer et al. 2023) rather than a learned
-VQ codebook: each latent dimension is squashed with tanh and rounded to a few levels, so the
-codebook is an implicit grid that cannot collapse and needs no auxiliary losses. (A first
-version with an EMA VQ codebook and zero-initialised FiLM layers collapsed: the decoder
-learned to predict frame t+k without the latent and the encoder settled on a constant.)
-
-References: LAPO, Learning to Act without Actions (Schmidt & Jiang, ICLR 2024): inverse and
-forward dynamics with a quantised latent, trained on video alone, then decoded to real actions
-with a small labelled set (here: a ridge map). LAPA, Latent Action Pretraining from Videos
-(Ye et al., ICLR 2025) scales the same idea to VLA pretraining, which this project does not do.
+References: LAPO, Learning to Act without Actions (Schmidt & Jiang, ICLR 2024); LAPA, Latent
+Action Pretraining from Videos (Ye et al., ICLR 2025), which scales the idea to VLA
+pretraining.
 """
 
 import math

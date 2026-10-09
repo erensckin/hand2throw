@@ -1,22 +1,12 @@
-"""Self-improvement for the throw policy: success-filtered behaviour cloning.
+"""Self-improvement: behaviour cloning on the policy's own successful rollouts.
 
-The simulator gives a free reward (ketchup in the basket), so the trained policy can make
-its own extra demonstrations:
-
-1. Copy the human dataset (data/throw_ketchup -> data/throw_ketchup_si) and its episode log
-   (data/throw_ketchup_raw/{episodes.jsonl, exclude.txt} -> data/throw_ketchup_si_raw/), once.
-   The original recordings are never modified.
-2. Run the policy at the TRAINING basket distances only, so the held-out distances (0.75,
-   0.85, 0.95) stay untouched for evaluation, with a different seed from eval_throw.py (fresh
-   layout jitter). Keep only episodes that end in the basket with the strategy expected for
-   the distance (place at 0.70 m, throw beyond); append them to the copy as new episodes,
-   logged with "source": "self".
-3. Fine-tune from the same checkpoint on human + self episodes, e.g.
+The simulator gives a free success signal, so the trained policy can make extra demos:
+  1. copy the teleop dataset and its episode log (once; the originals are never modified)
+  2. run the policy at the four training distances only, so the held-out distances stay
+     unseen; keep episodes that succeed with the expected strategy (place at 0.70 m, throw
+     beyond) and append them to the copy, logged with "source": "self"
+  3. fine-tune from the same checkpoint on demos plus kept rollouts:
        ROOT=data/throw_ketchup_si POLICY=<checkpoint> STEPS=5000 TAG=si bash scripts/train_throw.sh full
-
-Kept episodes are, by construction, the policy's accurate ones, so fine-tuning on them pulls
-its throw execution towards what worked. Overfitting guard: judge the result only on what
-it never trained on (held-out distances, the continuous sweep, random layouts).
 
 Usage (from the repo root):
     uv run python scripts/self_improve.py --policy outputs/train/<run>/checkpoints/020000/pretrained_model

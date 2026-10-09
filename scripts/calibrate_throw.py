@@ -1,44 +1,20 @@
-"""Calibrate the throw primitive: strength -> landing distance, with plain +-1 gripper.
+"""Calibrate the scripted throw: strength -> landing distance.
 
-Per trial: reset the throw scene with the basket moved beside the throw path, do a
-scripted top-down pick of the ketchup with +-1 gripper commands (exactly what teleop
-sends), lift to the wind-up pose, then run throw_env.ThrowPrimitive at a given
-strength and release step. The landing point is the object's first floor contact after
-free flight (detected as acceleration ~ (0, 0, -g)).
-
-Sweeps strength x release step and prints one row per trial. Then, for the release
-step that throws furthest, fits landing distance vs strength and prints the strength
-needed for each basket distance in throw_env (train and held-out). Results go to
-outputs/calibration/<timestamp>.csv.
-
-Realism check: MuJoCo does not enforce joint velocity limits, so each trial reports the
-peak joint speed as a fraction of the real Panda's limits (2.175 rad/s for joints 1-4,
-2.61 rad/s for joints 5-7, Franka datasheet). Above 100 % the throw is faster than the
-real arm could move.
+Each trial makes a scripted top-down pick of the ketchup (plain +-1 gripper commands, as in
+teleop), lifts to the wind-up pose and runs throw_env.ThrowPrimitive at a given strength and
+release step. The sweep over strength and release step is fitted as landing distance vs
+strength, and the strength needed for each basket distance is printed. With --basket the
+basket stands on the throw line and the summary gives the range of strengths that land in
+it (the in-basket window). Every trial also reports the peak joint speed relative to the
+real Panda's limits, which MuJoCo does not enforce.
 
 Usage (from the repo root):
     uv run python scripts/calibrate_throw.py
     uv run python scripts/calibrate_throw.py --view --slowmo 3 --strengths 0.84 --release-steps 2
-    uv run python scripts/calibrate_throw.py --view --slowmo 3 --strengths 0.84 --release-steps 2 --basket 1.10
-
-Release timing: the gripper is commanded open at --release-steps (default
-throw_env.THROW_RELEASE_STEP); --adaptive-release times it from the finger gap instead.
-Orientation: like teleop, the scripted pick and the throw hold the hand at its reset
-orientation (--no-orientation-hold to compare). The table shows the finger gap and the
-finger-axis angle to the throw direction at the start of the sweep (90 = fingers open
-sideways, 0 = along the throw, so the rear finger can keep pushing the object).
-
-In-basket windows: --basket puts the basket on the throw line at one or more distances
-(instead of beside it) and records whether each throw ends in it. For every basket the
-summary prints the range of strengths that land in it (the window: its centre is where to
-aim, its width is the real tolerance) and fits window centre vs distance:
     uv run python scripts/calibrate_throw.py --basket 0.8,0.9,1.0,1.1,1.2,1.25 --strengths 0.36:1.0:0.02
-Landing then often reads '-' because the object stops inside the basket, above the floor.
-
-Grasp robustness: --grasp-depths (m below the object's top) and --grasp-dx (m along the
-throw direction) vary the scripted grasp, the way a teleoperated (or learned) grasp
-varies; the summary prints the landing spread across grasps. Negative values need '=':
+    # grasp variation (negative values need '='):
     uv run python scripts/calibrate_throw.py --release-steps 2 --strengths 0.84 --grasp-depths 0.01,0.03,0.05 --grasp-dx=-0.015,0,0.015
+Results: outputs/calibration/<timestamp>.csv
 """
 
 import os

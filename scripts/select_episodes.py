@@ -1,15 +1,10 @@
 """Print the episodes to train on, as a JSON list for lerobot-train --dataset.episodes.
 
-Reads the per-episode log written by scripts/teleop.py and keeps episodes that succeeded
-with the strategy expected for their basket distance: place within reach (below
-PLACE_MAX), throw beyond it. Anything else (e.g. an accidental throw at the place
-distance) is dropped, so the dataset never has to be edited. Episodes listed in
-exclude.txt next to the log (one index per line, optional '# reason') are dropped too,
-for demos that succeeded but were sloppy. A per-distance summary and the dropped
-episodes go to stderr; stdout carries only the list.
-
-Data-scaling subsets: --per-distance N keeps only the first N kept episodes (in recording
-order) at each basket distance, so smaller training sets stay balanced.
+Keeps episodes that succeeded with the strategy expected for their basket distance (place
+below 0.775 m, throw beyond), minus those listed in exclude.txt next to the log. Accidental
+throws at the place distance drop out this way, so the dataset itself never has to be
+edited. --per-distance N keeps the first N per distance, in recording order, for balanced
+data-scaling subsets. A per-distance summary goes to stderr; stdout carries only the list.
 
 Usage:
     uv run python scripts/select_episodes.py [--per-distance N] [data/throw_ketchup_raw/episodes.jsonl]

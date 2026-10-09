@@ -1,41 +1,23 @@
-"""World-model fidelity: how far ahead can the latent action model's decoder be trusted?
+"""World-model fidelity: how far ahead can a latent action model's decoder be trusted?
 
-The decoder of a trained latent action model (scripts/lam.py) is a world model: current
-frame + latent action -> next frame (k steps = 0.2 s later). Here it imagines whole
-segments of held-out episodes (index % 5 == 0):
+On held-out episodes the decoder imagines video segments: it starts from one real frame and
+then feeds back its own predictions, with the latent actions taken from the real video.
+This is compared with one-step prediction (always from the real previous frame) and with
+copying the first frame ("nothing moves"), as PSNR against horizon, separately for the
+hand-driven phase and the scripted throw.
 
-    imagined   autoregressive: start from one real frame, then feed the model its OWN
-               predictions back in; the latent actions come from the real video, so the
-               model knows what happens but has to keep the scene consistent itself
-    one-step   teacher-forced: every step starts from the REAL previous frame
-    copy       baseline: "nothing moves" (the segment's first frame)
-
-Error (PSNR, higher = better) is reported against horizon (0.2 s .. H x 0.2 s), separately
-for segments in the hand-driven phases and segments containing the scripted throw.
-Outputs: a plot, a JSON of the numbers, and videos (real | imagined | difference) for a few
-held-out episodes, re-anchored to the real frame every H steps.
-
---fidelity adds three checks of where the world model can be trusted (fidelity.png, and a
-"fidelity" entry per phase in prediction.json); the default outputs are unchanged:
-
-    moving-pixel PSNR  error only on pixels that change (vs the segment start or the previous
-                       frame, mean |diff| > 0.04, the training loss's threshold): the static
-                       background no longer inflates the score
-    wrong-action       the same segment imagined with the latent actions of a different
-                       held-out segment (another episode): if the model is action-conditioned,
-                       predictions must get clearly worse; the drop measures how much they
-                       depend on the action
-    re-encode          the encoder applied to consecutive IMAGINED frames: share of latent
-                       tokens equal to the commanded latent (does the imagined video still show
-                       the commanded motion? blur doesn't help here). For the wrong-action
-                       rollout it is scored against the latents it was given ("follows") and
-                       against the real ones ("real"); "chance" = real vs other segment's codes.
+--fidelity adds three checks:
+    moving-pixel PSNR  error on changing pixels only, so the static background does not
+                       inflate the score
+    wrong-action       the same segment imagined with another episode's latents: how much
+                       the predictions depend on the action
+    re-encode          the encoder applied to the imagined frames: does the imagined video
+                       still show the commanded motion?
 
 Usage (from the repo root):
     uv run python scripts/lam_predict.py --sources robot_side,human_cam2_masked
-    uv run python scripts/lam_predict.py --sources robot_side --horizon 10 --videos 3
-    uv run python scripts/lam_predict.py --sources robot_side,human_cam2_masked --fidelity
-Results: outputs/lam/prediction_<time>/
+    uv run python scripts/lam_predict.py --sources robot_side --fidelity
+Results: outputs/lam/prediction_<time>/ (plots, prediction.json, videos)
 """
 
 import argparse
