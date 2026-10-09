@@ -175,7 +175,7 @@ def main() -> None:
     if args.fidelity:
         fig_f, axes_f = plt.subplots(2, len(sources), figsize=(6 * len(sources), 8), squeeze=False)
     for col, (ax, src) in enumerate(zip(axes[0], sources)):
-        ckpt = torch.load(RUNS / src / "lam.pt", map_location=args.device, weights_only=False)
+        ckpt = torch.load(RUNS / src / "lam.pt", map_location=args.device, weights_only=True)
         k = ckpt["k"]
         model = LatentActionModel(**ckpt["cfg"]).to(args.device).eval()
         model.load_state_dict(ckpt["model"])

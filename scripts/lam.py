@@ -386,7 +386,7 @@ def cmd_probe(args) -> None:
     sources = [s.strip() for s in args.sources.split(",") if s.strip()]
     results, human = {}, {}
     for source in sources:
-        ckpt = torch.load(RUNS / source / "lam.pt", map_location=device, weights_only=False)
+        ckpt = torch.load(RUNS / source / "lam.pt", map_location=device, weights_only=True)
         k = ckpt["k"]
         cache = load_cache(source)
         frames = torch.from_numpy(cache["frames"]).to(device)

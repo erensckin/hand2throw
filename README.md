@@ -97,7 +97,7 @@ The policy successfully places at 0.70m and throws beyond, and its throw strengt
 Increasing policy performance can be attempted in multiple ways:
 - Improve starting data: Obtain throw data with an RL policy instead of a pre-determined one. May reduce training quality, but may also reduce the scatter of throws compared to pre-determined, which had its own lower scatter compared to the VLA.
 - Improve throw after training: Use residual RL to correct the VLA's actions during the throw to reduce execution scatter.
-- Asynchronous inference Improvement: Training the policy on asynchronous inference and attempting real-time chunking is hypothesised to bring the async success closer to that of the sync (main) success.
+- Asynchronous inference improvement: Training the policy on asynchronous inference and attempting real-time chunking is hypothesised to bring the async success closer to that of the sync (main) success.
 - Layout diversity: Recording demos with varied object positions, to address the 0% on random layouts.
 
 ## Latent Action Model
@@ -145,7 +145,7 @@ A linear map from the latent to the robot's action, scored as R² (hand-driven p
 
 The low R² for raw is thought to be due to the noisy video data with monitor movements and body movements in the back. It may also be unable to better follow the hand against the movements of the elbow and rest of the arm. The silhouette may still show good results for the gripper due to the change in the shape of the silhouette. 
 
-The R² value for throws is around 0, thus providing a control. This value was correct for all recordings except the robot side camera (which includes the robot throw) and the raw webcam+phone. This is because the monitor present in the raw footage showed the robot throwing motion, thus presenting a miniature version of the robot side camera. Masking the hand resolved this issue. 
+The R² value for throws is around 0, thus providing a control. This value was correct for all recordings except the robot side camera (which includes the robot throw) and the raw webcam+phone. This is because the monitor visible in the raw phone footage showed the robot throwing motion, thus presenting a miniature version of the robot side camera. Masking the hand resolved this issue. 
 
 #### Can the decoder imagine ahead?
 From one real frame and the real latent actions, the robot-camera model stays accurate for about 2s of slow motion and 1s of the throw. Given another clip's actions it gets clearly worse, so it follows the actions.
@@ -157,8 +157,9 @@ From one real frame and the real latent actions, the robot-camera model stays ac
 <p align="center"><em>Robot side camera. Higher = imagined frames closer to the real ones, scored only on the pixels that move. "Another clip's actions" starts from the same frame but is given the latent actions of a different recording. "Nothing moves" copies the first frame.</em></p>
 
 The latents encode motion well enough to predict video, but whether they are usable actions depends on video and the amount of motion in the video.
+
 #### Can hand video replace teleop actions? 
-Actions inferred from hand video drove 159 re-simulated episodes (the throw is still scripted, started at the logged `t` press). The 56 successes trained SmolVLA to 20%, against 49% for the same 56 scenes with the teleop actions. Check **Fine-Tune Explorations & Evaluation**
+Actions inferred from hand video drove 159 re-simulated episodes (the throw is still scripted, started at the logged `t` press). The 56 successes trained SmolVLA to 20%, against 49% for the same 56 scenes with the teleop actions (see the Fine-Tune Explorations & Evaluation table).
 
 <p align="center">
   <img src="media/vi_vs_teleop_0.80.gif" width="500" alt="0.80 m: teleop vs video-inferred">
@@ -175,8 +176,8 @@ Video-inferred demos at https://huggingface.co/datasets/erensckin/hand2throw-vid
 
 Improving the LAM can be attempted in multiple ways:
 - Higher-resolution hand crops, to keep the finger detail the grip needs.
-- Improve training video quality to limit outside information, e.g user wears a coloured glove with a different colour for each finger to allow easier latent motion observation. 
-- Adapt model to train and take-in two videos instead of one, training to predict latents based off of both webcam and phone footage. 
+- Improve training video quality to limit outside information, e.g. the user wears a coloured glove with a different colour for each finger to allow easier latent motion observation. 
+- Adapt the model to train on and take in two videos instead of one, predicting latents from both webcam and phone footage. 
 
 ## Run it Yourself
 

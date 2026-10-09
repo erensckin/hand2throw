@@ -54,7 +54,7 @@ def features(device: str):
     """Latent (and landmark) features for every frame pair of both masked hand videos."""
     caches, z, lm, k = {}, {}, {}, None
     for src in SOURCES:
-        ckpt = torch.load(RUNS / src / "lam.pt", map_location=device, weights_only=False)
+        ckpt = torch.load(RUNS / src / "lam.pt", map_location=device, weights_only=True)
         k = ckpt["k"]
         cache = load_cache(src)
         model = LatentActionModel(**ckpt["cfg"]).to(device)
