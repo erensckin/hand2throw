@@ -1,10 +1,12 @@
 """Up-weight the throw: copy a dataset and add throw-only episodes.
 
 The throw is about a quarter of a throw demo's frames but decides success. For every kept
-throw episode, COPIES extra episodes containing only its throw segment are added, so throw
-frames are sampled about (1 + COPIES) times as often. The clips are real recorded frames and
-actions. The source dataset is copied first and never modified; clips are logged with
-"source": "clip" and "clip_of": <episode>.
+throw episode, --copies extra episodes containing only its throw segment are added, so throw
+frames are sampled about (1 + copies) times as often. A clip runs from just before the throw
+starts (the t press; for self-improvement rollouts, --windup frames before the first strong
+push) to the end of the episode. The clips are real recorded frames and actions. The source
+dataset is copied first and never modified; clips are logged with "source": "clip" and
+"clip_of": <episode>.
 
 Usage (from the repo root):
     uv run python scripts/make_throw_clips.py --src data/throw_ketchup_si --out data/throw_ketchup_si_uw
@@ -19,11 +21,11 @@ from pathlib import Path
 
 import numpy as np
 
-PLACE_MAX = 0.775  # as scripts/select_episodes.py
+PLACE_MAX = 0.775  # m, as in scripts/select_episodes.py
 
 
 def kept_episodes(log: Path) -> list[dict]:
-    """Episodes scripts/select_episodes.py would train on (success, expected strategy, not excluded)."""
+    """The episodes scripts/select_episodes.py would train on (success, expected strategy, not excluded)."""
     excluded = set()
     ex = log.parent / "exclude.txt"
     if ex.exists():
@@ -44,11 +46,12 @@ def kept_episodes(log: Path) -> list[dict]:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--src", default="data/throw_ketchup_si")
-    p.add_argument("--out", default="data/throw_ketchup_si_uw")
+    p.add_argument("--src", default="data/throw_ketchup_si", help="dataset to copy (never modified)")
+    p.add_argument("--out", default="data/throw_ketchup_si_uw", help="new dataset with the added clips")
     p.add_argument("--copies", type=int, default=1, help="throw-only clips added per throw episode")
     p.add_argument("--margin", type=int, default=5, help="frames before the throw start kept in a clip")
-    p.add_argument("--windup", type=int, default=30, help="self episodes: frames before the first strong push")
+    p.add_argument("--windup", type=int, default=30,
+                   help="self-improvement rollouts: frames before the first strong push taken as the throw start")
     p.add_argument("--limit", type=int, default=None, help="only clip the first N throw episodes (quick test)")
     args = p.parse_args()
 

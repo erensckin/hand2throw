@@ -35,11 +35,11 @@ import throw_env
 
 OBJECT = "ketchup_1"
 GRAVITY = 9.81
-FREE_FLIGHT_TOL = 1.5  # m/s^2
-CLOSE_STEPS = 12  # +1 gripper steps while closing (target ends fully closed, like a held pinch)
-APPROACH_HEIGHT = 0.10  # pre-grasp height above the object's top (m)
+FREE_FLIGHT_TOL = 1.5  # m/s^2: free flight once the acceleration is this close to (0, 0, -g)
+CLOSE_STEPS = 12  # +1 gripper steps while closing (the target ends fully closed, like a held pinch)
+APPROACH_HEIGHT = 0.10  # m, pre-grasp height above the object's top
 FLIGHT_STEPS = 50  # steps watched after the primitive ends (2.5 s)
-BASKET_ASIDE = (0.5, 1.2)  # basket distance / lateral offset (m): beside the throw path, not in it
+BASKET_ASIDE = (0.5, 1.2)  # m, basket distance and lateral offset: beside the throw path, not in it
 PANDA_JOINT_VEL_LIMITS = np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61])  # rad/s, real robot
 
 
@@ -68,7 +68,7 @@ class Runner:
         self.env, self.viewer = env, viewer
         self.dt = slowmo / throw_env.CONTROL_FREQ
         self.obs = None
-        self.hold_quat = None  # hand orientation to hold (set after each reset), like teleop
+        self.hold_quat = None  # hand orientation to hold (set after each reset), as in teleop
 
     def servo(self, target: np.ndarray, gripper: float) -> np.ndarray:
         a = throw_env.p_action(self.obs["robot0_eef_pos"], target, gripper)
@@ -146,6 +146,8 @@ def pick(run: Runner, grasp_depth: float = throw_env.GRASP_DEPTH_REF, grasp_dx: 
 
 def run_trial(run: Runner, strength: float, release_step: int | None, angle: float, basket: float | None,
               grasp_depth: float = throw_env.GRASP_DEPTH_REF, grasp_dx: float = 0.0, hold: bool = True) -> dict:
+    """One trial: reset, pick, throw at `strength`, then watch the flight. Returns a row of
+    measurements (release timing, launch speed and angle, landing, joint speeds, status)."""
     env = run.env
     if basket is None:
         run.obs = throw_env.reset_scene(env, basket_distance=BASKET_ASIDE[0], basket_lateral=BASKET_ASIDE[1])
@@ -179,6 +181,7 @@ def run_trial(run: Runner, strength: float, release_step: int | None, angle: flo
                               step=phase_step, reach=throw_env.reach_info(env)[0], ee=grip_speed(env))
 
     def watch(step_index: int) -> None:
+        """Detect the launch (first free-flight step after the open command) and the touchdown."""
         o, v = object_state(env)
         prev = track["prev"]
         if track["cmd"] is not None and track["launch"] is None and prev is not None and prev["i"] >= track["cmd"]:
@@ -294,9 +297,9 @@ def summarize_baskets(results: list[dict]) -> None:
 def summarize(results: list[dict]) -> None:
     """Fit landing distance vs strength separately for every release step.
 
-    The step used by the primitive is throw_env.THROW_RELEASE_STEP; the per-step fits are
-    printed so that choice can be checked (a good release step gives a straight line with
-    small residuals, i.e. the object leaves at peak speed every time).
+    The primitive uses throw_env.THROW_RELEASE_STEP; the per-step fits show whether that is a
+    good choice (a straight line with small residuals means the object leaves at peak speed
+    every time).
     """
     if any(r.get("basket") is not None for r in results):
         summarize_baskets(results)
@@ -350,13 +353,14 @@ def summarize(results: list[dict]) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--strengths", type=parse_floats, default=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+    p.add_argument("--strengths", type=parse_floats, default=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+                   help="comma list; an item 'start:stop:step' expands to a range including stop")
     p.add_argument("--release-steps", type=parse_ints, default=[throw_env.THROW_RELEASE_STEP],
-                   help="with --fixed-release: sweep steps at which the gripper is commanded open")
+                   help="sweep steps at which the gripper is commanded open (ignored with --adaptive-release)")
     p.add_argument("--adaptive-release", action="store_true",
                    help="time the release from the finger gap instead of fixed --release-steps")
     p.add_argument("--no-orientation-hold", action="store_true",
-                   help="don't hold the hand orientation during pick and throw (behaviour before 2026-10-05 evening)")
+                   help="don't hold the hand orientation during the pick and throw")
     p.add_argument("--angle", type=float, default=throw_env.THROW_ANGLE_DEG, help="launch direction (deg)")
     p.add_argument("--basket", type=parse_floats, default=None,
                    help="comma list: put the basket on the throw line at these distances from the base (m) "
@@ -366,9 +370,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--grasp-dx", type=parse_floats, default=[0.0],
                    help="grasp offsets along the throw direction to try, m (negative = behind; write --grasp-dx=-0.01,0)")
     p.add_argument("--view", action="store_true", help="watch in the MuJoCo viewer")
-    p.add_argument("--slowmo", type=float, default=1.0)
+    p.add_argument("--slowmo", type=float, default=1.0, help="viewer only: play this many times slower")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--out", default="outputs/calibration")
+    p.add_argument("--out", default="outputs/calibration", help="folder for the results CSV")
     return p.parse_args()
 
 

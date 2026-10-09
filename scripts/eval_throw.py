@@ -56,11 +56,11 @@ RENAME = {
     "observation.images.image3": "observation.images.camera3",
 }
 LIFT_HEIGHT = 0.05  # m above its resting height: counts as grasped
-THROW_SPEED = 1.0  # m/s: the ketchup is moving fast (thrown or dropped): wait for it to settle
+THROW_SPEED = 1.0  # m/s: above this the ketchup was thrown or dropped; then wait for it to settle
 THROW_ACTION = 0.5  # peak commanded translation while holding: counts as a throw
 SETTLE_SPEED = 0.05  # m/s
 SETTLE_STEPS = 5
-SUCCESS_HOLD = 10  # steps (0.5 s), like teleop's auto-save
+SUCCESS_HOLD = 10  # steps (0.5 s) in the basket, as for teleop's auto-save
 
 
 def load_policy(path: str, device: str, n_action_steps: int | None):
@@ -124,8 +124,19 @@ def throw_run(actions: np.ndarray) -> tuple[int, int] | None:
 def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video_path=None,
                 latency: int | None = None, throw_replan: bool = False,
                 horizon_from_throw: int | None = None, throw_lead: int = 0) -> dict:
-    """latency None: the original select_action loop. An int: our own chunk loop, optionally
-    with the throw rules (see module doc)."""
+    """Run one episode and return its row of results.
+
+    latency None (default): actions come from LeRobot's queue (policy.select_action).
+    An int switches to our own chunk loop. The next prediction starts when `latency` actions
+    of the current chunk are left, from the observation at that moment, and arrives `latency`
+    steps later; its first `latency` actions are then already in the past and are dropped.
+
+    Throw rules (chunk loop only). The sweep is the first run of actions above THROW_ACTION;
+    the throw is taken to start `throw_lead` steps before it. With throw_replan, a chunk that
+    plans a throw ahead is cut just before it, once per episode, and the fresh plan is executed
+    through the end of its sweep. With horizon_from_throw, chunks are that long once the throw
+    has started.
+    """
     obs = throw_env.reset_scene(env, basket_distance=distance, layout=layout)
     policy.reset()
     if latency is not None:
@@ -134,8 +145,8 @@ def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video
         state = {"cut_done": False, "commit": False, "cut_step": None, "throw_started": False}
 
         def load_chunk(actions: np.ndarray, at_step: int) -> deque:
-            """Queue a chunk's actions (index 0 = the current step); without the throw rules this is
-            exactly actions[:horizon]."""
+            """Queue a chunk's actions (index 0 = the current step). Without the throw rules this
+            is just actions[:horizon]."""
             h = horizon_from_throw if (horizon_from_throw and state["throw_started"]) else horizon
             run = throw_run(actions) if (throw_replan or state["commit"]) else None
             if state["commit"]:  # the fresh plan after a cut: keep it through its whole throw
@@ -148,7 +159,7 @@ def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video
                 if start > latency:  # throw ahead: stop just before it, replan from a fresh view
                     state["commit"], state["cut_step"] = True, at_step + start
                     return deque(actions[:start])
-                h = max(h, run[1] + 3)  # throw starts (almost) now: this plan is fresh; keep it through
+                h = max(h, run[1] + 3)  # the throw starts now or almost: this plan is fresh, so keep it
             return deque(actions[:h])
 
         chunk, ms = predict_chunk(policy, pre, post, obs, task)  # first plan before the robot moves
@@ -168,7 +179,7 @@ def run_episode(env, policy, pre, post, task, distance, layout, max_steps, video
     t0 = time.perf_counter()
     step = 0
     for step in range(1, max_steps + 1):
-        if latency is None:  # the original loop: LeRobot's queue
+        if latency is None:  # default: LeRobot's own queue
             with torch.inference_mode():
                 action = policy.select_action(pre(make_batch(obs, task)))
             action = post(action).to("cpu").numpy().reshape(-1)
@@ -319,9 +330,10 @@ def parse_args() -> argparse.Namespace:
                    help="override how many actions of each predicted chunk are executed (checkpoint default: 50)")
     p.add_argument("--latency-steps", type=int, default=None,
                    help="use our own chunk loop with this emulated inference latency in control steps "
-                        "(50 ms each); 0 = synchronous. Omit for the original select_action loop")
+                        "(50 ms each); 0 = synchronous. Omit for the default select_action loop")
     p.add_argument("--throw-replan", action="store_true",
-                   help="chunk loop: replan just before a planned throw and commit through it (see doc)")
+                   help="chunk loop: replan just before a planned throw and keep that plan through it "
+                        "(see run_episode)")
     p.add_argument("--horizon-from-throw", type=int, default=None,
                    help="chunk loop: chunk length from the start of the throw on")
     p.add_argument("--throw-lead", type=int, default=0,
@@ -379,7 +391,7 @@ def main() -> None:
     if args.throw_lead < 0:
         raise SystemExit("--throw-lead must be >= 0")
     if (args.throw_replan or args.horizon_from_throw) and args.latency_steps is None:
-        args.latency_steps = 0  # the throw rules live in our chunk loop; synchronous unless asked
+        args.latency_steps = 0  # the throw rules need our chunk loop; synchronous unless asked otherwise
         print("Throw rules given: using the chunk loop, synchronous (--latency-steps 0)")
     if args.horizon_from_throw is not None and not (
             args.latency_steps or 0) < args.horizon_from_throw <= policy.config.chunk_size - (args.latency_steps or 0):

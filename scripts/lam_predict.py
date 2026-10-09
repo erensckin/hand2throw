@@ -65,9 +65,10 @@ def rollouts(model, frames, starts: np.ndarray, k: int, horizon: int, batch: int
 @torch.no_grad()
 def fidelity_rollouts(model, frames, starts: np.ndarray, partners: np.ndarray, k: int, horizon: int,
                       batch: int = 128, thresh: float = 0.04):
-    """Per start row s (and its partner segment p from another episode), per step n = 1..horizon:
-    moving-pixel MSE of imagined / one-step / copy / wrong-action (NaN if nothing moves), full
-    MSE of the wrong-action rollout, and re-encode token agreement."""
+    """For each segment start s and a partner segment p from another episode, per step
+    n = 1..horizon: MSE on moving pixels for imagined / one-step / copy / wrong-action (NaN when
+    nothing moves), full-frame MSE of the wrong-action rollout, and how often re-encoding the
+    predicted frames gives back the commanded latent tokens."""
     mov = {key: [] for key in ("imagined", "one-step", "copy", "wrong-action")}
     full_wrong, match = [], {key: [] for key in ("imagined", "one-step", "wrong: follows", "wrong: real", "chance")}
     for b in range(0, len(starts), batch):
@@ -85,6 +86,7 @@ def fidelity_rollouts(model, frames, starts: np.ndarray, partners: np.ndarray, k
             img = model.decode(img, q).clamp(0, 1)
             wrong = model.decode(wrong, q_o).clamp(0, 1)
             one = model.decode(real[n - 1], q).clamp(0, 1)
+            # pixels that changed since the segment start or since the previous frame
             moving = (((real[n] - real[0]).abs().mean(1, keepdim=True) > thresh)
                       | ((real[n] - real[n - 1]).abs().mean(1, keepdim=True) > thresh)).float()
             npx = moving.sum(dim=(1, 2, 3)) * 3
@@ -109,7 +111,7 @@ def fidelity_rollouts(model, frames, starts: np.ndarray, partners: np.ndarray, k
 
 
 def pick_partners(starts: np.ndarray, ep: np.ndarray, seed: int = 0) -> np.ndarray:
-    """For every segment start, the start of a random segment from a DIFFERENT episode."""
+    """For every segment start, the start of a random segment from a different episode."""
     rng = np.random.default_rng(seed)
     partners = starts[rng.permutation(len(starts))]
     for i in range(len(starts)):
@@ -128,7 +130,7 @@ def film(model, frames, rows: np.ndarray, k: int, horizon: int, path: Path, scal
         r0, r1 = int(rows[i]), int(rows[i + k])
         x0, x1 = to_float(frames[[r0]]), to_float(frames[[r1]])
         if (i // k) % horizon == 0:
-            img = x0  # re-anchor to reality
+            img = x0  # re-anchor to the real frame
         _, q, _ = model.encode(x0, x1)
         img = model.decode(img, q).clamp(0, 1)
         tiles = [x1, img, ((img - x1).abs() * 4).clamp(0, 1)]
@@ -140,7 +142,7 @@ def film(model, frames, rows: np.ndarray, k: int, horizon: int, path: Path, scal
             cv2.putText(frame, title, (x, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
         if writer is None:
             writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 20 / k * 2,
-                                     (frame.shape[1], frame.shape[0]))  # half speed: 2 predictions per 0.2 s shown
+                                     (frame.shape[1], frame.shape[0]))  # twice real time: each frame is one 0.2 s step
         writer.write(frame)
     if writer is not None:
         writer.release()
@@ -148,7 +150,8 @@ def film(model, frames, rows: np.ndarray, k: int, horizon: int, path: Path, scal
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--sources", default="robot_side,human_cam2_masked")
+    p.add_argument("--sources", default="robot_side,human_cam2_masked",
+                   help="comma list of trained sources (each needs outputs/lam/<source>/lam.pt and its cache)")
     p.add_argument("--horizon", type=int, default=10, help="imagined steps of k frames (10 x 0.2 s = 2 s)")
     p.add_argument("--stride", type=int, default=10, help="frames between segment starts")
     p.add_argument("--videos", type=int, default=2, help="held-out episodes to film per source")

@@ -58,13 +58,13 @@ MODEL_URL = (
 )
 MODEL_PATH = Path.home() / ".cache" / "mediapipe" / "hand_landmarker.task"
 PALM_IDS = [0, 5, 9, 13, 17]  # wrist + finger bases: a stable palm centre
-HAND_SIZE_M = 0.09  # typical adult wrist -> middle-finger-base length (m): converts hand-size units to metres
+HAND_SIZE_M = 0.09  # m, typical adult wrist-to-middle-finger-base length: converts hand-size units to metres
 WS_LOW = np.array([-0.50, -0.35, 0.02])  # gripper-target workspace box (world, m)
 WS_HIGH = np.array([0.35, 0.35, 0.80])
 MAX_EPISODE_STEPS = 600  # 30 s at 20 Hz
 SETTLE_SPEED = 0.05  # m/s: below this for SETTLE_STEPS the thrown object counts as at rest
 SETTLE_STEPS = 5
-SUCCESS_HOLD_STEPS = 10  # success predicate must hold this long (0.5 s) before auto-save
+SUCCESS_HOLD_STEPS = 10  # the ketchup must stay in the basket this long (0.5 s) before the episode auto-saves
 LOST_RESET_FRAMES = 5  # after this many frames without a hand, smoothing restarts
 WINDOW = "teleop"
 THROW_KEY = ord("t")
@@ -216,10 +216,11 @@ class TrackerWorker:
 class HandFeatures:
     """Hand features from one camera, updated only when that camera delivers a new frame.
 
-    uv: palm centre's offset from the image centre in units of the hand's apparent size
-    (wrist -> middle-finger base). Pinhole camera: u = X / S, the real sideways offset over
-    the real hand size, independent of the hand's distance to the camera. Smoothed with
-    `alpha`; the size (which changes slowly) more strongly, so its noise stays out of uv.
+    uv is the palm centre's offset from the image centre, in units of the hand's apparent
+    size (wrist to middle-finger base). For a pinhole camera this equals the real offset
+    divided by the real hand size, whatever the hand's distance from the camera. uv is
+    smoothed with `alpha`; the size changes slowly and is smoothed more strongly, so its
+    noise stays out of uv.
     """
 
     def __init__(self, alpha: float, alpha_size: float = 0.3):
@@ -230,7 +231,7 @@ class HandFeatures:
         self.lost = 0
 
     def update(self, res: dict):
-        if res["stamp"] == self.stamp:  # no new frame from this camera: nothing new to smooth in
+        if res["stamp"] == self.stamp:  # no new frame from this camera
             return self.last
         self.stamp = res["stamp"]
         pts, frame = res["pts"], res["frame"]
@@ -461,10 +462,10 @@ def main() -> None:
     mapping = args.mapping if args.mapping != "auto" else ("ego" if args.camera2 else "planar")
     if mapping == "ego" and not args.camera2:
         raise SystemExit("--mapping ego needs --camera2 (forward/back comes from the second camera)")
-    # Forward default for ego + phone on your LEFT looking across (unmirrored): moving the hand
-    # towards the screen moves it left in the phone image, i.e. negative image x.
+    # Default forward sign with the phone on your left, looking across your hand: moving the
+    # hand towards the screen moves it left in the phone image (negative image x).
     fwd_default = -1.0 if (mapping == "ego" and args.cam2_axis == "horizontal") else 1.0
-    lat_default = -1.0 if mapping == "ego" else 1.0  # set from use on the dev machine (2026-10-05)
+    lat_default = -1.0 if mapping == "ego" else 1.0  # chosen by testing the setup
     signs = {
         "fwd": fwd_default * (-1.0 if args.flip_forward else 1.0),
         "up": -1.0 if args.flip_up else 1.0,
@@ -580,7 +581,7 @@ def main() -> None:
             ee = obs["robot0_eef_pos"].copy()
 
             if st["throw"] is not None:
-                # ---- scripted throw: hand input ignored, its actions are recorded like any other
+                # ---- scripted throw: hand input is ignored; its actions are recorded like any others
                 a = st["throw"].next_action(env, obs)
                 if st["throw"].done:
                     gap = st["throw"].grip_gap
@@ -616,7 +617,7 @@ def main() -> None:
                     target[0] = st["cam2_anchor"] + signs["fwd"] * k * (f2["uv"][axis] - st["anchor2"]["uv"][axis])
                 if st["following"]:
                     # Keep the target reachable and move the anchors with it, so pulling the hand
-                    # back moves the arm back at once instead of the arm seeming stuck.
+                    # back moves the arm back at once instead of leaving it stuck at the limit.
                     clamped = throw_env.clamp_to_reach(env, target)
                     correction = clamped - target
                     if np.any(correction):
@@ -624,7 +625,7 @@ def main() -> None:
                         if st["cam2_anchor"] is not None:
                             st["cam2_anchor"] += correction[0]
                         target = clamped
-                    st["hold"] = target  # if a hand is lost, keep going to the last target
+                    st["hold"] = target  # if the hand is lost, keep going to the last target
                 target = np.clip(target, WS_LOW, WS_HIGH)
 
                 a = throw_env.p_action(ee, target, gripper=1.0 if st["grip_closed"] else -1.0, gain=args.track_gain)
@@ -708,7 +709,7 @@ def main() -> None:
                 text_panel(lines, size),
                 camera_panel(c2, size, cam2_label),
             ])
-            ema("render", (time.perf_counter() - t_ren) * 1000)  # now: composing + showing the window
+            ema("render", (time.perf_counter() - t_ren) * 1000)  # composing and showing the window
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
@@ -726,7 +727,7 @@ def main() -> None:
             elif key == THROW_KEY and st["basket"] < 0.775:
                 print("[throw] ignored: this basket is within reach, place it by hand")
             elif key == THROW_KEY and st["throw"] is None and st["thrown"] is None:
-                distance = st["basket"]  # true distance: privileged, demonstrator only
+                distance = st["basket"]  # the true distance: privileged, known only to the demonstrator
                 strength = throw_env.strength_for_distance(distance)
                 st["throw"] = throw_env.ThrowPrimitive(env, strength, hold_quat=st["hold_quat"])
                 st["thrown"] = {"target_distance": distance, "strength": round(strength, 3), "start_step": st["n"]}

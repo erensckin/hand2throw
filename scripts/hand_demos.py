@@ -38,7 +38,7 @@ from lam_model import LatentActionModel
 from retarget_replay import SOURCES, Ridge, kept_episodes, per_step_actions
 from teleop import FEATURES, SUCCESS_HOLD_STEPS
 
-POST_THROW_MAX = 120  # steps after the throw (or after the hand actions run out) to reach SUCCESS_HOLD_STEPS
+POST_THROW_MAX = 120  # steps after the throw (or after the hand actions run out) to meet the success rule
 
 
 def features(device: str):
@@ -65,8 +65,8 @@ def features(device: str):
 
 
 def rollout(env, entry: dict, actions: np.ndarray, task: str) -> dict:
-    """Re-simulate one episode from hand-video actions, recording every frame (teleop's format
-    and ending rule)."""
+    """Re-simulate one episode from hand-video actions and record every frame, with teleop's
+    format and ending rule."""
     obs = throw_env.reset_scene(env, basket_distance=entry["basket_distance"], targets=entry["clutter"])
     hold_quat = obs["robot0_eef_quat"].copy()
     inner = env.env
@@ -78,7 +78,7 @@ def rollout(env, entry: dict, actions: np.ndarray, task: str) -> dict:
     prim, hold, grip = None, None, -1.0
     step = 0
     while True:
-        if step < hand_steps:  # hand-driven phase: actions from the hand video
+        if step < hand_steps:  # hand-driven phase: actions inferred from the hand video
             a = np.zeros(7)
             a[:3] = np.clip(actions[step, :3], -1.0, 1.0)
             a[3:6] = throw_env.orientation_action(obs["robot0_eef_quat"], hold_quat)
@@ -95,7 +95,7 @@ def rollout(env, entry: dict, actions: np.ndarray, task: str) -> dict:
             a = prim.next_action(env, obs)
             if prim.done:
                 grip = -1.0  # the throw ends with the gripper open
-        else:  # hold still (teleop after a throw / with no hand input), until success or timeout
+        else:  # hold still, as in teleop after a throw or without hand input, until success or timeout
             if hold is None:
                 hold = obs["robot0_eef_pos"].copy()
             if step - max(hand_steps, 0) > POST_THROW_MAX + (60 if is_throw else 0):
@@ -125,12 +125,12 @@ def main() -> None:
     p.add_argument("--raw", default="data/throw_ketchup_raw", help="episode log of the teleop recordings")
     p.add_argument("--out", default="data/throw_ketchup_hand", help="new dataset (must not exist)")
     p.add_argument("--features", choices=["latent", "landmarks"], default="latent",
-                   help="what drives the robot: latent actions from hand pixels, or tracker landmarks")
+                   help="what drives the robot: latent actions of the masked hand video, or the tracker's landmarks")
     p.add_argument("--fit", choices=["heldout", "train"], default="heldout",
-                   help="episodes whose teleop actions fit the map: the latent models' held-out fifth "
-                        "(default, few labels; generation uses the rest) or the other four fifths")
+                   help="which teleop episodes fit the map to robot actions: the latent models' held-out fifth "
+                        "(default; all other clean demos are generated) or the other four fifths")
     p.add_argument("--limit", type=int, default=None, help="generate from at most N episodes (smoke test)")
-    p.add_argument("--alpha", type=float, default=10.0)
+    p.add_argument("--alpha", type=float, default=10.0, help="ridge regularisation")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
 

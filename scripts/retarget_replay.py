@@ -40,13 +40,15 @@ from lam import RUNS, is_test_episode, landmark_features, latent_features, load_
 from lam_model import LatentActionModel
 
 SOURCES = ("human_cam1_masked", "human_cam2_masked")  # webcam (left/right, up/down, pinch), phone (fwd/back)
-PLACE_MAX = 0.775  # as scripts/select_episodes.py
-LIFT_HEIGHT = 0.05
+PLACE_MAX = 0.775  # m, as in scripts/select_episodes.py
+LIFT_HEIGHT = 0.05  # m above its resting height: counts as grasped
 GRIP_HYSTERESIS = 0.3  # predicted gripper: close above +0.3, open below -0.3, else keep
-SETTLE_STEPS_MAX = 60
+SETTLE_STEPS_MAX = 60  # steps to wait at the end for the ketchup to come to rest
 
 
 class Ridge:
+    """Ridge regression on standardised inputs, with an unregularised bias."""
+
     def __init__(self, x, y, alpha: float = 10.0):
         self.mu, self.sd = x.mean(0), x.std(0) + 1e-6
         a = np.hstack([(x - self.mu) / self.sd, np.ones((len(x), 1))])
@@ -59,7 +61,8 @@ class Ridge:
 
 
 def kept_episodes(raw: Path) -> dict[int, dict]:
-    """Episodes the VLA trained on (success, expected strategy, not excluded), by index."""
+    """The clean demos by index: successful, with the expected strategy and not in exclude.txt
+    (the same rule as scripts/select_episodes.py)."""
     excluded = set()
     if (raw / "exclude.txt").exists():
         for line in (raw / "exclude.txt").read_text().splitlines():
@@ -77,8 +80,9 @@ def kept_episodes(raw: Path) -> dict[int, dict]:
 
 
 def per_step_actions(pred: np.ndarray, starts: np.ndarray, n_steps: int, k: int) -> np.ndarray:
-    """Window predictions (motion summed over k steps; gripper = mean) -> one action per step:
-    each step averages every window covering it (translation / k), gripper with hysteresis."""
+    """Turn per-window predictions into one action per step. A window's prediction is its motion
+    summed over k steps (gripper: the mean). Each step averages all windows that cover it, with
+    the motion divided by k, and the gripper becomes +-1 with hysteresis."""
     acc, cnt = np.zeros((n_steps, 7)), np.zeros(n_steps)
     for s, p in zip(starts, pred):
         acc[s:s + k, :6] += p[:6] / k
@@ -87,7 +91,7 @@ def per_step_actions(pred: np.ndarray, starts: np.ndarray, n_steps: int, k: int)
     covered = cnt > 0
     acc[covered] /= cnt[covered, None]
     last = np.where(covered)[0]
-    for s in range(n_steps):  # steps no window covers (episode end): hold the last estimate
+    for s in range(n_steps):  # steps no window covers (the end of the episode): hold the last estimate
         if not covered[s] and len(last):
             acc[s] = acc[last[last < s][-1] if (last < s).any() else last[0]]
     grip, out = -1.0, acc.copy()
@@ -124,7 +128,7 @@ def replay(env, entry: dict, actions: np.ndarray, from_teleop: bool, frames=None
         else:
             a = np.zeros(7)
             a[:3] = np.clip(actions[s, :3], -1.0, 1.0)
-            a[3:6] = throw_env.orientation_action(obs["robot0_eef_quat"], hold_quat)  # as teleop
+            a[3:6] = throw_env.orientation_action(obs["robot0_eef_quat"], hold_quat)  # held, as in teleop
             a[6] = actions[s, 6]
             reach, radial = throw_env.reach_info(env)
             if reach > throw_env.WRIST_REACH_LIMIT:  # teleop's hard stop near full extension
@@ -149,6 +153,7 @@ def replay(env, entry: dict, actions: np.ndarray, from_teleop: bool, frames=None
 
 
 def video_frame(hand1, hand2, robot, label: str, size: int = 256) -> np.ndarray:
+    """One video frame: both hand-only videos next to the robot's side camera."""
     tiles = []
     for img, title in ((hand1, "webcam (hand only)"), (hand2, "phone (hand only)"), (robot, f"robot: {label}")):
         tile = cv2.resize(img, (size, size), interpolation=cv2.INTER_NEAREST if img.shape[0] < size else cv2.INTER_AREA)
@@ -160,10 +165,10 @@ def video_frame(hand1, hand2, robot, label: str, size: int = 256) -> np.ndarray:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--raw", default="data/throw_ketchup_raw")
+    p.add_argument("--raw", default="data/throw_ketchup_raw", help="folder with the teleop episode log")
     p.add_argument("--episodes", type=int, default=None, help="limit the number of held-out episodes")
     p.add_argument("--videos", type=int, default=4, help="episodes to film (latent variant)")
-    p.add_argument("--alpha", type=float, default=10.0)
+    p.add_argument("--alpha", type=float, default=10.0, help="ridge regularisation")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
 

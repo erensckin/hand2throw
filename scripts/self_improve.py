@@ -31,7 +31,7 @@ import throw_env
 from eval_throw import LIFT_HEIGHT, SETTLE_SPEED, SETTLE_STEPS, SUCCESS_HOLD, THROW_ACTION, THROW_SPEED, \
     load_policy, make_batch
 
-PLACE_MAX = 0.775  # m: below = placed by hand in the demos, above = thrown (as scripts/select_episodes.py)
+PLACE_MAX = 0.775  # m: place below, throw above (as in scripts/select_episodes.py)
 
 
 def rollout(env, policy, pre, post, task: str, distance: float, max_steps: int) -> dict:
@@ -78,6 +78,7 @@ def rollout(env, policy, pre, post, task: str, distance: float, max_steps: int) 
 
 
 def prepare_copy(src_root: Path, src_raw: Path, out_root: Path, out_raw: Path) -> None:
+    """Copy the teleop dataset and its episode log once; later runs append to the copy."""
     if out_root.exists():
         print(f"Using existing {out_root} (episodes are appended)")
         return
@@ -92,12 +93,12 @@ def prepare_copy(src_root: Path, src_raw: Path, out_root: Path, out_raw: Path) -
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--policy", required=True, help="checkpoint folder (.../checkpoints/<step>/pretrained_model)")
-    p.add_argument("--src", default="data/throw_ketchup", help="human dataset to copy")
-    p.add_argument("--out", default="data/throw_ketchup_si", help="copy that receives the self episodes")
+    p.add_argument("--src", default="data/throw_ketchup", help="teleop dataset to copy")
+    p.add_argument("--out", default="data/throw_ketchup_si", help="the copy that receives the kept rollouts")
     p.add_argument("--per-distance", type=int, default=25, help="successful episodes to keep per training distance")
     p.add_argument("--max-attempts", type=int, default=None, help="per distance (default: 4 x --per-distance)")
-    p.add_argument("--max-steps", type=int, default=500)
-    p.add_argument("--seed", type=int, default=1, help="differs from eval_throw.py's 0, so eval layouts stay unseen")
+    p.add_argument("--max-steps", type=int, default=500, help="per episode (25 s at 20 Hz)")
+    p.add_argument("--seed", type=int, default=1, help="random seed for the layout jitter (eval_throw.py defaults to 0)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
 

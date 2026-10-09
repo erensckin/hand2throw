@@ -191,9 +191,9 @@ def cmd_extract(args) -> None:
 
 
 def cmd_silhouette(args) -> None:
-    """Mask-only control caches, row-aligned with the masked caches. The masked caches hold,
-    per episode, the first n operator frames in order, so row i of an episode is video frame
-    i and landmark i (as in cmd_extract); only the video size is read, nothing is decoded."""
+    """Build the mask-only control caches, row-aligned with the masked caches: row i of an
+    episode is video frame i and landmark i, as in cmd_extract. Only each video's size is
+    read; no frames are decoded."""
     t0 = time.time()
     for name, cam in HUMAN_CAMS.items():
         base = load_cache(f"{name}_masked")
@@ -432,10 +432,11 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     e = sub.add_parser("extract")
-    e.add_argument("--dataset", default="data/throw_ketchup")
+    e.add_argument("--dataset", default="data/throw_ketchup", help="local LeRobotDataset folder")
     e.add_argument("--repo-id", default="local/throw_ketchup")
-    e.add_argument("--raw", default="data/throw_ketchup_raw")
-    e.add_argument("--size", type=int, default=96)
+    e.add_argument("--raw", default="data/throw_ketchup_raw",
+                   help="folder with episodes.jsonl and, if available, the operator videos and landmarks")
+    e.add_argument("--size", type=int, default=96, help="frame size of the caches (px)")
     e.add_argument("--workers", type=int, default=8)
     t = sub.add_parser("train")
     t.add_argument("--source", required=True, choices=[*ROBOT_CAMS, *HUMAN_SOURCES])
@@ -452,7 +453,8 @@ def main() -> None:
     m = sub.add_parser("silhouette")
     m.add_argument("--raw", default="data/throw_ketchup_raw")
     q = sub.add_parser("probe")
-    q.add_argument("--sources", default="robot_side,human_cam1,human_cam2")
+    q.add_argument("--sources", default="robot_side,human_cam1,human_cam2",
+                   help="comma list of trained sources (each needs outputs/lam/<source>/lam.pt and its cache)")
     q.add_argument("--device", default="cuda")
     args = p.parse_args()
     {"extract": cmd_extract, "train": cmd_train, "probe": cmd_probe, "silhouette": cmd_silhouette}[args.cmd](args)
