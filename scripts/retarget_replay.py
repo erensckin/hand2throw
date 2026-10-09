@@ -14,6 +14,12 @@ extension. Throws are the same scripted primitive, started at the logged t press
 itself is never retargeted. Reports grasp rate, success and the gripper's path error against
 the teleop replay.
 
+Options:
+    --episodes N   replay only the first N held-out episodes (default: all 41)
+    --videos N     film the first N episodes of the latent variant (default 4)
+    --alpha A      ridge regularisation (default 10)
+    --raw DIR      folder with the teleop episode log
+
 Usage (from the repo root, after training the two masked human models with lam.py):
     uv run python scripts/retarget_replay.py
     uv run python scripts/retarget_replay.py --episodes 10 --videos 3

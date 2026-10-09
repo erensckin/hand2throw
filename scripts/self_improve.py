@@ -8,6 +8,14 @@ The simulator gives a free success signal, so the trained policy can make extra 
   3. fine-tune from the same checkpoint on demos plus kept rollouts:
        ROOT=data/throw_ketchup_si POLICY=<checkpoint> STEPS=5000 TAG=si bash scripts/train_throw.sh full
 
+Options:
+    --policy P         checkpoint folder to roll out (required)
+    --per-distance N   successful rollouts to keep per training distance (default 25)
+    --max-attempts N   attempts per distance before giving up (default 4 x --per-distance)
+    --max-steps N      steps per episode (default 500 = 25 s)
+    --seed S           random seed for the layout jitter (default 1)
+    --src, --out       teleop dataset to copy; the copy that receives the rollouts
+
 Usage (from the repo root):
     uv run python scripts/self_improve.py --policy outputs/train/<run>/checkpoints/020000/pretrained_model
     uv run python scripts/self_improve.py --policy ... --per-distance 1 --out data/throw_ketchup_si_test   # quick test

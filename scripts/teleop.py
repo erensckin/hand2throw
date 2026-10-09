@@ -27,6 +27,19 @@ Keys (click the window first):
     f / v / l  flip forward / vertical / lateral direction
     m      toggle fullscreen         q      quit (discards an unsaved episode)
 
+Options (the most useful; --help lists all):
+    --camera C          webcam index or stream URL (default 0)
+    --camera2 URL       phone stream, e.g. from the DroidCam app; enables the two-camera mapping
+    --no-record         practise: nothing is saved
+    --distances D       comma list of basket distances (default: the four training distances)
+    --root DIR          dataset folder (default data/throw_ketchup); raw video goes to DIR_raw/
+    --gain G            robot metres per metre of hand motion (default 1.7)
+    --pinch-close, --pinch-open
+                        pinch ratios that close and open the gripper (default 0.30, 0.45)
+    --flip-forward, --flip-up, --flip-lateral
+                        start with an axis inverted (also the f / v / l keys)
+    --no-auto-save      don't save successful episodes automatically
+
 Usage (from the repo root):
     uv run python scripts/teleop.py --no-record --camera2 http://PHONE_IP:4747/video    # practise
     uv run python scripts/teleop.py --camera2 http://PHONE_IP:4747/video                # record

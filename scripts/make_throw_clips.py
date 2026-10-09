@@ -8,6 +8,14 @@ push) to the end of the episode. The clips are real recorded frames and actions.
 dataset is copied first and never modified; clips are logged with "source": "clip" and
 "clip_of": <episode>.
 
+Options:
+    --copies N     throw-only clips added per throw episode (default 1)
+    --margin N     frames kept before the throw starts (default 5)
+    --windup N     self-improvement rollouts: the throw is taken to start N frames before
+                   the first strong push (default 30)
+    --limit N      clip only the first N throw episodes (quick test)
+    --src, --out   dataset to copy (never modified); new dataset with the clips
+
 Usage (from the repo root):
     uv run python scripts/make_throw_clips.py --src data/throw_ketchup_si --out data/throw_ketchup_si_uw
 """

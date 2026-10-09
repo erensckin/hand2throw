@@ -14,6 +14,13 @@ hand-driven phase and the scripted throw.
     re-encode          the encoder applied to the imagined frames: does the imagined video
                        still show the commanded motion?
 
+Options:
+    --sources S    comma list of trained models (outputs/lam/<source>/lam.pt and its cache)
+    --horizon N    imagined steps of 0.2 s (default 10 = 2 s)
+    --stride N     frames between segment starts (default 10)
+    --videos N     held-out episodes to film per source (default 2)
+    --fidelity     also run the three checks above
+
 Usage (from the repo root):
     uv run python scripts/lam_predict.py --sources robot_side,human_cam2_masked
     uv run python scripts/lam_predict.py --sources robot_side --fidelity

@@ -13,6 +13,15 @@
 Caveats: the masks come from the hand tracker, the latent models saw these videos during
 their unsupervised training, and the throw uses privileged strength, as in teleop.
 
+Options:
+    --limit N        generate from only N source episodes, spread over the distances (smoke test)
+    --features F     what drives the robot: latent (default, masked hand video) or landmarks
+                     (the hand tracker's), for comparison
+    --fit F          which episodes fit the map to robot actions: heldout (default, the 41
+                     held-out episodes; all others are generated) or train (the other four fifths)
+    --alpha A        ridge regularisation (default 10)
+    --raw, --out     teleop episode log folder; new dataset folder (must not exist)
+
 Usage (from the repo root):
     uv run python scripts/hand_demos.py --limit 2 --out data/throw_ketchup_hand_smoke   # smoke test
     uv run python scripts/hand_demos.py

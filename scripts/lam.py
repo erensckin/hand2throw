@@ -20,6 +20,15 @@ phone video leaks the robot's motion, including the throw.
 The probe target for a pair (t, t+k) is the sum of the k actions in between (for the
 gripper, their mean).
 
+Options:
+    extract     --raw DIR (episode log, plus operator videos if available), --dataset DIR,
+                --size PX (default 96)
+    train       --source S (required), --k (default 4), --steps (15000), --batch (128),
+                --lr (3e-4), --tokens (4), --levels (5,5,5), --motion-weight (10, extra loss
+                weight on changing pixels)
+    probe       --sources S (comma list)
+    silhouette  --raw DIR (operator videos and landmarks)
+
 Usage (from the repo root):
     uv run python scripts/lam.py extract
     uv run python scripts/lam.py train --source robot_side

@@ -12,9 +12,9 @@
 # scripts/select_episodes.py.
 #
 # Environment overrides: STEPS, BATCH, WORKERS, SAVE_FREQ, OUT, EXTRA (extra lerobot-train
-# args), POLICY (starting checkpoint), ROOT (dataset folder; its log is
-# <ROOT>_raw/episodes.jsonl), TAG (added to the run name), PER_DIST (first N clean demos per
-# distance), EPISODES (explicit JSON list of episode indices, replaces the selection).
+# args), POLICY (starting checkpoint), ROOT (dataset folder), LOG (episode log, default
+# <ROOT>_raw/episodes.jsonl), REPO_ID, TAG (added to the run name), PER_DIST (first N clean
+# demos per distance), EPISODES (explicit JSON list of episode indices, replaces the selection).
 #   PER_DIST=25 bash scripts/train_throw.sh full                                                # data scaling
 #   ROOT=data/throw_ketchup_si POLICY=<ckpt> STEPS=5000 TAG=si bash scripts/train_throw.sh full   # self-improvement
 set -euo pipefail

@@ -8,6 +8,19 @@ basket stands on the throw line and the summary gives the range of strengths tha
 it (the in-basket window). Every trial also reports the peak joint speed relative to the
 real Panda's limits, which MuJoCo does not enforce.
 
+Options:
+    --strengths S         throw strengths to try; a comma list, 'start:stop:step' for a range
+    --release-steps N     sweep steps at which the gripper is commanded open (default 2)
+    --adaptive-release    time the release from the finger gap instead
+    --basket D            put the basket on the throw line at these distances (m) and report
+                          which strengths land in it
+    --grasp-depths, --grasp-dx
+                          vary the scripted grasp (m below the top, m along the throw) to
+                          measure the landing spread between grasps
+    --angle A             launch angle above horizontal (deg, default 45)
+    --no-orientation-hold let the hand's orientation drift (teleop holds it)
+    --view, --slowmo F    watch in the MuJoCo viewer, F times slower
+
 Usage (from the repo root):
     uv run python scripts/calibrate_throw.py
     uv run python scripts/calibrate_throw.py --view --slowmo 3 --strengths 0.84 --release-steps 2
