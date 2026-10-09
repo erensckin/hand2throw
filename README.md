@@ -18,9 +18,9 @@ The SmolVLA used in the original LIBERO tasks (lerobot/smolvla_libero) is furthe
 
 ### Data Collection
 
-To fine-tune the new task, user data was collected using a mix of teleoperation through hand-tracking and pre-determined motions. For the grip and movement, teleoperation is conducted. Using 2 cameras, the user's hand is tracked in 3D. The distance between the index finger and thumb determines the Franka Panda's grip (binary). Upon a successful grip, the user presses t on their keyboard, which conducts the pre-determined throw motion based on basket placement. This was done as camera low fps & motion blur make tracking at high speeds difficult, meaning webcam teleop is insufficient for highly dynamic actions. The throw demonstrations use privileged strength based on true position of the basket. The policy does not receive this privilege and needs to infer strength and distance from cameras. The throw action exceeds the maximum speed of the joints, and thus this specific throw motion is from simulation testing only. 
+To fine-tune the new task, user data was collected using a mix of teleoperation through hand-tracking and pre-determined motions. For the grip and movement, teleoperation is conducted. Using 2 cameras, the user's hand is tracked in 3D. The distance between the index finger and thumb determines the Franka Panda's grip (binary). Upon a successful grip, the user presses t on their keyboard, which conducts the pre-determined throw motion based on basket placement. This was done as camera low fps & motion blur make tracking at high speeds difficult, meaning webcam teleop is insufficient for highly dynamic actions. The throw demonstrations use privileged throw strength based on true position of the basket. The policy does not receive this privilege and needs to infer strength and distance from cameras. The throw action exceeds the maximum speed of the joints, and thus this specific throw motion is for simulation testing only. 
 
-An initial 205 demos were recorded, of which 5 are excluded due to bad training data (such as knocking basket over during placement, throwing instead of placing). 
+An initial 205 demos were recorded, of which 5 are excluded from VLA training due to bad training data (such as knocking basket over during placement, throwing instead of placing). 
 
 The dataset is available at https://huggingface.co/datasets/erensckin/hand2throw-teleop-demos
 
@@ -32,10 +32,9 @@ The dataset is available at https://huggingface.co/datasets/erensckin/hand2throw
 
 ### Fine-Tune Explorations & Evaluation
 
-The fine-tuning methods and their respective success rates over 210 episodes (70 episodes per seed, 3 seeds) are given. The evaluation tests the baskets at 0.70m, 0.75m, 0.80m, 0.85m, 0.90m, 0.95m and 1.00m, 10 per distance per seed. No training was done for 0.75m, 0.85m or 0.95m, therefore these test the continuous strength inference by the VLA model. Unless stated otherwise, the policy executes all 50 actions of each predicted chunk before planning again.
+The fine-tuning methods and their respective success rates over 210 episodes (70 episodes per seed, 3 seeds) are given. The evaluation tests the baskets at 0.70m, 0.75m, 0.80m, 0.85m, 0.90m, 0.95m and 1.00m, 10 per distance per seed. No training was done for 0.75m, 0.85m or 0.95m, therefore these test the continuous strength inference of the VLA model. Unless stated otherwise, the policy executes 50 actions in each predicted chunk before planning again.
 
-Differences under about 10 points are within noise: with 210 episodes the standard error is about ±3.4 points, and the seeds of a single model already spread by 6-14 points (main model: 47 / 43 / 41 %, teleop-matched: 53 / 54 / 40 %).
-
+Differences under about 10% are within noise: with 210 episodes the standard error is about ±3.4%.
 
 | Method | Description | Grip Success Rate | Throw Success Rate | Success Rate |
 |---|---|---|---|---|
@@ -85,8 +84,8 @@ The policy successfully places at 0.70m and throws beyond, and its throw strengt
 |---|---|
 | Main model | Decent success, but struggles in the throws, mainly because landings scatter ±14cm compared to ±4cm for the privileged scripted thrower used in the demos. |
 | 100 demonstrations | Within noise of main: no measurable gain from 100 to 200 demos on this fixed-layout task. |
-| Matched demos (teleop & video-inferred) | Video-inferred has considerably less success, and the gap is almost entirely grasping (33% vs 88%). Once it grasps, it succeeds as often (62% vs 56%). More on this in the LAM section. Teleop-matched scored higher than main but within noise; the successful video inference may have acted as a filter for cleaner demos (the kept episodes were 0.25-1s shorter at the throw distances). |
-| Extra training | Within noise of main: beyond 20k steps the success rate stays around constant. |
+| Matched demos (teleop & video-inferred) | Video-inferred has considerably less success, and the gap is almost entirely grasping (33% vs 88%). Once it grasps, it succeeds as often (62% vs 56%). Teleop-matched scored higher than main but within noise; the successful video inference may have acted as a filter for cleaner demos (the kept episodes were 0.25-1s shorter at the throw distances). |
+| Extra training | Within noise of main. |
 | Self-improvement | Training on the VLA's own successful rollouts made it worse (31% vs 41% for the extra-training control), possibly because some successes were partly luck, and from overfitting to the policy's own behaviour, reducing its ability to recover from unfamiliar states. |
 | Self-improvement + throw up-weighting | Worse by far. The throw-only clips take up a bigger share of training, so grasp frames are seen less often and grasping collapses (65% to 40%). The clips may also have broken the continuity between grasp and throw. |
 | Shorter chunks | No measurable difference to grasping or throwing. The one clear effect is the place at 0.70m, which rises from 57% to 90% with more frequent re-planning; the throw happens within a single chunk, so re-planning doesn't reach it. |
@@ -95,7 +94,7 @@ The policy successfully places at 0.70m and throws beyond, and its throw strengt
 | No fine-tuning | 0%. The pretrained LIBERO policy can place the ketchup in its own task, but cannot throw or handle the new action scale. |
 
 Increasing policy performance can be attempted in multiple ways:
-- Improve starting data: Obtain throw data with an RL policy instead of a pre-determined one. May reduce training quality, but may also reduce the scatter of throws compared to pre-determined, which had its own lower scatter compared to the VLA.
+- Improve starting data: Obtain throw data with an RL policy instead of a pre-determined one. May reduce the scatter of throws compared to pre-determined trajectories.
 - Improve throw after training: Use residual RL to correct the VLA's actions during the throw to reduce execution scatter.
 - Asynchronous inference improvement: Training the policy on asynchronous inference and attempting real-time chunking is hypothesised to bring the async success closer to that of the sync (main) success.
 - Layout diversity: Recording demos with varied object positions, to address the 0% on random layouts.
@@ -143,12 +142,12 @@ A linear map from the latent to the robot's action, scored as R² (hand-driven p
 | Robot side camera | 0.20 | 0.23 | 0.20 |
 | Robot side camera, untrained encoder (reference) | 0.26 | 0.20 | 0.18 |
 
-The low R² for raw is thought to be due to the noisy video data with monitor movements and body movements in the back. It may also be unable to better follow the hand against the movements of the elbow and rest of the arm. The silhouette may still show good results for the gripper due to the change in the shape of the silhouette. 
+The low R² for raw is thought to be due to the noisy video data with monitor movements and body movements in the back. It may also be unable to better follow the hand against the movements of the elbow and rest of the arm. The silhouette may still show good results for the gripper due to the change in the shape of the silhouette. The limited size of the latent at 28 bits may be unable to capture all movements in the scene, thus performing better with masked & silhouette videos. 
 
 The R² value for throws is around 0, thus providing a control. This value was correct for all recordings except the robot side camera (which includes the robot throw) and the raw webcam+phone. This is because the monitor visible in the raw phone footage showed the robot throwing motion, thus presenting a miniature version of the robot side camera. Masking the hand resolved this issue. 
 
 #### Can the decoder imagine ahead?
-From one real frame and the real latent actions, the robot-camera model stays accurate for about 2s of slow motion and 1s of the throw. Given another clip's actions it gets clearly worse, so it follows the actions.
+From one real frame and the real latent actions, the robot-camera model stays accurate for about 2s. Given another clip's actions it gets clearly worse, so it follows the actions.
 
 <p align="center">
   <img src="media/fidelity.png" width="600" alt="World-model fidelity vs horizon">
@@ -176,8 +175,9 @@ Video-inferred demos at https://huggingface.co/datasets/erensckin/hand2throw-vid
 
 Improving the LAM can be attempted in multiple ways:
 - Higher-resolution hand crops, to keep the finger detail the grip needs.
-- Improve training video quality to limit outside information, e.g. the user wears a coloured glove with a different colour for each finger to allow easier latent motion observation. 
+- Improve training video quality to limit outside information, e.g. the user wears a coloured glove with a different colour for each finger to allow easier latent motion observation, and train on separate RGB channels.  
 - Adapt the model to train on and take in two videos instead of one, predicting latents from both webcam and phone footage. 
+- Increase size of latents
 
 ## Run it Yourself
 
